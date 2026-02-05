@@ -68,7 +68,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
             
         case 'analyzeHomework':
-            analyzeHomeworkWithAI(request.imageData, request.selectionInfo)
+            // 修复：之前代码中可能缺失 analyzeHomeworkWithAI，这里重定向到 analyzeImageWithAI
+            analyzeImageWithAI(request.imageData)
+                .then(response => {
+                    sendResponse({ success: true, data: response });
+                })
+                .catch(error => {
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true;
+
+        case 'analyzeHomeworkDOM':
+            analyzeDOMHomeworkWithAI(request.content)
                 .then(response => {
                     sendResponse({ success: true, data: response });
                 })
@@ -475,6 +486,74 @@ async function tryAlternativeOCR(imageData, language = 'chs') {
         
     } catch (error) {
         console.error(`备用OCR ${language}失败:`, error);
+        throw error;
+    }
+}
+
+// 基于 DOM 内容的 AI 阅卷分析
+async function analyzeDOMHomeworkWithAI(content) {
+    try {
+        console.log('开始 DOM AI 阅卷，内容长度:', content.length);
+
+        // 获取用户自定义的批改规则
+        const correctionRules = await new Promise((resolve) => {
+            chrome.storage.local.get(['correctionRules'], (result) => {
+                resolve(result.correctionRules || {
+                    focusAreas: ['语法', '拼写', '标点'],
+                    strictness: 'medium',
+                    customInstructions: ''
+                });
+            });
+        });
+
+        const strictnessPrompts = {
+            lenient: '请以鼓励为主，指出主要优点，对小错误给予宽容，提供建设性建议。',
+            medium: '请平衡指出优点和需要改进的地方，提供具体的修改建议。',
+            strict: '请进行细致的批改，指出所有错误和不足，提供详细的改进方案。'
+        };
+
+        const strictnessPrompt = strictnessPrompts[correctionRules.strictness] || strictnessPrompts.medium;
+        const focusAreasText = correctionRules.focusAreas.length > 0
+            ? `重点关注：${correctionRules.focusAreas.join('、')}`
+            : '全面批改';
+
+        const analysisPrompt = `
+请作为专业的教师，对以下从网页 DOM 中提取的作业内容进行自动阅卷和批改。
+内容中包含了题目文本以及学生的回答（标注为 [学生填写] 或 [学生回答]）。
+
+【批改要求】
+${strictnessPrompt}
+${focusAreasText}
+${correctionRules.customInstructions ? `\n特殊要求：${correctionRules.customInstructions}` : ''}
+
+【作业内容 (DOM 提取)】
+${content}
+
+请按以下格式提供专业批改报告：
+
+**📝 题目解析**
+简要描述识别到的题目内容。
+
+**📊 阅卷结果与评分**
+• 正确性：依据学生回答与题目的匹配度进行评价。
+• 建议得分：_/100分
+
+**✅ 表现亮点**
+指出回答中的正确之处或出彩点。
+
+**⚠️ 存在的问题**
+详细列出回答中的错误、偏差或不完整之处。
+
+**💡 针对性指导**
+给出正确的答案参考及详细的解析过程。
+
+**📚 知识点巩固**
+推荐相关的知识点或学习建议。
+        `;
+
+        return await callDeepSeekAPI(analysisPrompt);
+    } catch (error) {
+        console.error('DOM AI 阅卷失败:', error);
         throw error;
     }
 }
