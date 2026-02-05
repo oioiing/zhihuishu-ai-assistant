@@ -1587,16 +1587,15 @@
                     padding:12px; 
                     border:2px solid #e0e0e0; 
                     border-radius:8px; 
-                    cursor:pointer;
                     transition:all 0.2s ease;
                     background:white;
-                " onmouseover="this.style.borderColor='#FF6B6B'; this.style.background='#fff5f5';" 
+                " onmouseover="this.style.borderColor='#2196F3'; this.style.background='#f0f7ff';"
                    onmouseout="this.style.borderColor='#e0e0e0'; this.style.background='white';">
                     <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
                         <div style="
                             width:32px; 
                             height:32px; 
-                            background:#FF6B6B; 
+                            background:#2196F3;
                             color:white; 
                             border-radius:50%; 
                             display:flex; 
@@ -1631,7 +1630,20 @@
                         max-height:60px; 
                         overflow:hidden;
                         line-height:1.4;
+                        margin-bottom:8px;
                     ">${preview}</div>
+                    <div style="display:flex; gap:8px;">
+                        <button class="zh-dom-grade-btn" data-index="${index}" style="
+                            flex:1; background:#4CAF50; color:white; border:none;
+                            padding:8px; border-radius:4px; cursor:pointer; font-size:12px; font-weight:600;
+                            transition: opacity 0.2s;
+                        " onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">🔍 DOM 自动阅卷</button>
+                        <button class="zh-ocr-grade-btn" data-index="${index}" style="
+                            flex:1; background:#FF6B6B; color:white; border:none;
+                            padding:8px; border-radius:4px; cursor:pointer; font-size:12px; font-weight:600;
+                            transition: opacity 0.2s;
+                        " onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">📸 截图批改</button>
+                    </div>
                 </div>
             `;
         });
@@ -1666,9 +1678,22 @@
         
         // 添加点击事件
         setTimeout(() => {
-            const items = document.querySelectorAll('.homework-area-item');
-            items.forEach((item, index) => {
-                item.addEventListener('click', () => {
+            // DOM 自动阅卷按钮
+            const domBtns = document.querySelectorAll('.zh-dom-grade-btn');
+            domBtns.forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const index = btn.getAttribute('data-index');
+                    handleDOMGrading(areas[index]);
+                });
+            });
+
+            // 截图批改按钮
+            const ocrBtns = document.querySelectorAll('.zh-ocr-grade-btn');
+            ocrBtns.forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const index = btn.getAttribute('data-index');
                     highlightAndCaptureArea(areas[index]);
                 });
             });
@@ -1692,7 +1717,171 @@
         const preview = text.trim().substring(0, 100);
         return preview || '(无文本内容)';
     }
+
+    // --- DOM 内容提取逻辑 ---
+    function extractStructuredHomework(element) {
+        let content = "";
+
+        function walk(node) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                const text = node.textContent.trim();
+                if (text) content += text + " ";
+            } else if (node.nodeType === Node.ELEMENT_NODE) {
+                const tagName = node.tagName.toLowerCase();
+
+                // 跳过不相关的标签
+                if (['script', 'style', 'noscript', 'iframe'].includes(tagName)) return;
+
+                // 处理输入框
+                if (tagName === 'input') {
+                    const type = node.type.toLowerCase();
+                    if (['text', 'number', 'email', 'url'].includes(type)) {
+                        content += ` [学生填写: ${node.value || '(未填写)'}] `;
+                    } else if ((type === 'radio' || type === 'checkbox') && node.checked) {
+                        const labelText = findLabelForInput(node);
+                        content += ` [学生选择: ${labelText || '已选中'}] `;
+                    }
+                    return; // 不再递归处理 input 的子节点
+                } else if (tagName === 'textarea') {
+                    content += ` [学生回答: ${node.value || '(未填写)'}] `;
+                    return; // 不再递归处理 textarea 的子节点
+                } else if (tagName === 'select') {
+                    const selectedOption = node.options[node.selectedIndex];
+                    content += ` [学生选择: ${selectedOption ? selectedOption.text : '(未选择)'}] `;
+                    return; // 不再递归处理 select 的子节点
+                }
+
+                // 递归处理子节点
+                for (let child of node.childNodes) {
+                    walk(child);
+                }
+
+                // 块级元素换行
+                if (['p', 'div', 'li', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'tr'].includes(tagName)) {
+                    content += "\n";
+                }
+            }
+        }
+
+        function findLabelForInput(input) {
+            // 1. 尝试通过 id 找 label[for]
+            if (input.id) {
+                const label = document.querySelector(`label[for="${input.id}"]`);
+                if (label) return label.innerText.trim();
+            }
+            // 2. 尝试找父级 label
+            let parent = input.parentElement;
+            while (parent) {
+                if (parent.tagName.toLowerCase() === 'label') return parent.innerText.trim();
+                parent = parent.parentElement;
+            }
+            // 3. 尝试找相邻的文本
+            const nextSibling = input.nextSibling;
+            if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE) {
+                return nextSibling.textContent.trim();
+            }
+            return "";
+        }
+
+        walk(element);
+        return content.replace(/\n\s*\n/g, '\n').trim();
+    }
     
+    function handleDOMGrading(area) {
+        console.log('🔍 开始 DOM 自动阅卷...');
+        animateRingStart('#4CAF50');
+
+        updatePanelBody(`
+            <div style="text-align:center; padding:30px;">
+                <div style="font-size:18px; margin-bottom:10px;">🤖 正在提取页面内容并分析...</div>
+                <div style="font-size:14px; color:#666;">
+                    正在分析区域：${area.selector || area.type}
+                </div>
+            </div>
+        `);
+
+        try {
+            const structuredContent = extractStructuredHomework(area.element);
+
+            if (!structuredContent || structuredContent.length < 5) {
+                throw new Error('未能从该区域提取到有效文本或输入内容');
+            }
+
+            console.log('✅ DOM 内容提取成功，长度:', structuredContent.length);
+
+            // 发送给后台进行 AI 分析
+            chrome.runtime.sendMessage({
+                action: 'analyzeHomeworkDOM',
+                content: structuredContent
+            }, (response) => {
+                if (response && response.success) {
+                    displayDOMAnalysisResult(response.data, structuredContent);
+                } else {
+                    updatePanelBody(`
+                        <div style="color:red; padding:20px;">
+                            ❌ 自动阅卷失败: ${response ? response.error : '未知错误'}
+                            <br><br>
+                            <button onclick="window.zhBackToDetection()" style="background:#FF6B6B; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer;">
+                                返回重试
+                            </button>
+                        </div>
+                    `);
+                }
+                animateRingStop();
+            });
+
+        } catch (error) {
+            console.error('❌ DOM 阅卷失败:', error);
+            updatePanelBody(`
+                <div style="color:red; padding:20px;">
+                    ❌ 提取内容失败: ${error.message}
+                    <br><br>
+                    <button onclick="window.zhBackToDetection()" style="background:#FF6B6B; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer;">
+                        返回重试
+                    </button>
+                </div>
+            `);
+            animateRingStop();
+        }
+    }
+
+    function displayDOMAnalysisResult(analysisData, extractedContent) {
+        const html = `
+            <div style="max-height:500px; overflow-y:auto; padding:10px;">
+                <!-- 提取内容预览 -->
+                <div style="margin-bottom:16px; padding:12px; background:#f8f9fa; border-radius:8px; border-left:4px solid #4CAF50;">
+                    <div style="font-weight:600; margin-bottom:8px; color:#2e7d32; display:flex; justify-content:space-between;">
+                        <span>📝 提取到的题目与回答</span>
+                        <span style="font-size:11px; font-weight:normal; background:#e8f5e9; padding:2px 8px; border-radius:10px;">DOM 模式</span>
+                    </div>
+                    <div style="font-size:13px; color:#444; max-height:100px; overflow-y:auto; white-space:pre-wrap; background:white; padding:8px; border:1px solid #eee; border-radius:4px;">${extractedContent}</div>
+                </div>
+
+                <!-- AI分析结果 -->
+                <div style="background:#fff; border-radius:8px; border:1px solid #e5e7eb; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                    <div style="background:#4CAF50; color:white; padding:12px; border-radius:8px 8px 0 0; font-weight:600; display:flex; align-items:center; gap:8px;">
+                        <span>🤖</span> AI 智能阅卷报告
+                    </div>
+                    <div style="padding:16px; white-space:pre-wrap; line-height:1.6; font-size:14px; color:#333;">
+                        ${analysisData}
+                    </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div style="margin-top:16px; text-align:center; display:flex; gap:8px; justify-content:center;">
+                    <button onclick="window.zhBackToDetection()" style="background:#9E9E9E; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:12px;">
+                        ⬅️ 返回列表
+                    </button>
+                    <button onclick="window.zhSaveAnalysis()" style="background:#2196F3; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:12px;">
+                        💾 保存结果
+                    </button>
+                </div>
+            </div>
+        `;
+
+        updatePanelBody(html);
+    }
+
     function highlightAndCaptureArea(area) {
         console.log('📸 准备捕获选定的作业区域...');
         
