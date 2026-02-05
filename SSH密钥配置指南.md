@@ -297,12 +297,14 @@ if [ -z "$SSH_AUTH_SOCK" ]; then
    ssh-add ~/.ssh/id_ed25519
 fi
 ```
+⚠️ **注意**：如果您设置了密码短语，每次打开新的 Git Bash 窗口时仍需输入一次密码。
 
-**PowerShell 解决方案**：
+**PowerShell 解决方案**（推荐）：
 ```powershell
 # 设置 ssh-agent 服务为自动启动
 Get-Service ssh-agent | Set-Service -StartupType Automatic
 ```
+使用 Windows 的 OpenSSH Authentication Agent 服务，在系统启动时自动启动 ssh-agent。您只需在重启后第一次使用 SSH 时输入密码短语，之后该会话会在整个系统范围内保持，直到下次重启。
 
 ### Q5: push 时提示 "Permission denied (publickey)"？
 

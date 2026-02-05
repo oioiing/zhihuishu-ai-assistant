@@ -295,12 +295,14 @@ if [ -z "$SSH_AUTH_SOCK" ]; then
    ssh-add ~/.ssh/id_ed25519
 fi
 ```
+⚠️ **Note**: If you set a passphrase, you'll still need to enter it once each time you open a new Git Bash window.
 
-**PowerShell solution**:
+**PowerShell solution** (Recommended):
 ```powershell
 # Set ssh-agent service to start automatically
 Get-Service ssh-agent | Set-Service -StartupType Automatic
 ```
+Using Windows' OpenSSH Authentication Agent service, ssh-agent starts automatically at system boot. You only need to enter the passphrase once after reboot, and the session persists system-wide until the next restart.
 
 ### Q5: "Permission denied (publickey)" when pushing?
 
