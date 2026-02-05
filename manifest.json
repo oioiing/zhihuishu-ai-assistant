@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "智慧树 AI 助教",
+  "version": "1.0.0",
+  "description": "基于 DeepSeek AI 的智能教学助手，帮助老师生成教案和批改建议",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "desktopCapture",
+    "scripting",
+    "storage",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://api.deepseek.com/*",
+    "https://*.deepseek.com/*",
+    "https://api.ocr.space/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "智慧树 AI 助教 - 悬浮列表展开版",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://zhihuishu.com/*",
+        "https://www.zhihuishu.com/*",
+        "https://*.zhihuishu.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; connect-src 'self' https://api.deepseek.com https://*.deepseek.com https://api.ocr.space; object-src 'self'"
+  }
+}
