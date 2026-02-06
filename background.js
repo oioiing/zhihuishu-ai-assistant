@@ -1,5 +1,40 @@
 // 智慧树 AI 助教 - 背景脚本（修复版）
 
+// ========================================
+// 配置管理
+// ========================================
+
+// 从 chrome.storage 获取 API 密钥
+async function getApiKeys() {
+    return new Promise((resolve) => {
+        chrome.storage.sync.get(['deepseekApiKey', 'ocrApiKey', 'debugMode'], (result) => {
+            resolve({
+                deepseek: result.deepseekApiKey || '',
+                ocr: result.ocrApiKey || '',
+                debugMode: result.debugMode || false
+            });
+        });
+    });
+}
+
+// 调试日志函数
+let DEBUG_MODE = false;
+function debugLog(...args) {
+    if (DEBUG_MODE) {
+        console.log('[DEBUG]', ...args);
+    }
+}
+
+// 初始化调试模式
+getApiKeys().then(keys => {
+    DEBUG_MODE = keys.debugMode;
+    console.log('🔧 调试模式:', DEBUG_MODE ? '已启用' : '已禁用');
+});
+
+// ========================================
+// 插件初始化
+// ========================================
+
 // 插件安装时的初始化
 chrome.runtime.onInstalled.addListener((details) => {
     console.log('智慧树 AI 助教插件已安装');
@@ -20,6 +55,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             // 简单的ping响应，用于测试连接
             console.log('📡 Ping请求，发送pong响应');
             sendResponse({ success: true, message: 'pong', timestamp: Date.now() });
+            return true;
+        
+        case 'reloadConfig':
+            // 重新加载配置
+            getApiKeys().then(keys => {
+                DEBUG_MODE = keys.debugMode;
+                console.log('🔄 配置已重载');
+                console.log('🔧 调试模式:', DEBUG_MODE ? '已启用' : '已禁用');
+                sendResponse({ success: true, message: '配置已重载' });
+            });
             return true;
             
         case 'callDeepSeekAPI':
@@ -315,12 +360,21 @@ async function callOnlineOCRWithLanguage(imageData, language) {
     try {
         console.log(`调用${language}语言OCR服务...`);
         
+        // 获取 OCR API 密钥
+        const keys = await getApiKeys();
+        const ocrApiKey = keys.ocr || 'helloworld';
+        
+        if (ocrApiKey === 'helloworld') {
+            console.warn('⚠️ 使用默认 OCR API Key，识别可能受限');
+            console.warn('💡 建议在设置中配置 OCR.space API Key 以获得更好的服务');
+        }
+        
         // 将base64数据转换为可用格式
         const base64Data = imageData.split(',')[1];
         
         const formData = new FormData();
         formData.append('base64Image', `data:image/png;base64,${base64Data}`);
-        formData.append('apikey', 'helloworld');
+        formData.append('apikey', ocrApiKey);
         formData.append('language', language);
         formData.append('isOverlayRequired', 'false');
         formData.append('detectOrientation', 'true');
@@ -459,12 +513,16 @@ async function performLocalOCR(imageData) {
 // 尝试备用OCR服务
 async function tryAlternativeOCR(imageData, language = 'chs') {
     try {
+        // 获取 OCR API 密钥
+        const keys = await getApiKeys();
+        const ocrApiKey = keys.ocr || 'helloworld';
+        
         const response = await fetch(imageData);
         const blob = await response.blob();
         
         const formData = new FormData();
         formData.append('file', blob, 'screenshot.png');
-        formData.append('apikey', 'helloworld');
+        formData.append('apikey', ocrApiKey);
         formData.append('language', language);
         
         const ocrResponse = await fetch('https://api.ocr.space/parse/image', {
@@ -560,11 +618,18 @@ ${content}
 
 // 分析文字内容（使用自定义批改规则）
 async function analyzeTextContent(text) {
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b";  // 用户的真实API密钥
     const API_URL = "https://api.deepseek.com/chat/completions";
     
+    // 从 chrome.storage 获取 API 密钥
+    const keys = await getApiKeys();
+    const API_KEY = keys.deepseek;
+    
+    if (!API_KEY || !API_KEY.startsWith('sk-') || API_KEY.length < 35) {
+        throw new Error("❌ DeepSeek API密钥未配置或格式错误。请在插件设置中配置正确的API密钥（格式: sk-xxxxx...）。");
+    }
+    
     try {
-        console.log('开始AI分析，文字长度:', text.length);
+        debugLog('开始AI分析，文字长度:', text.length);
         
         // 获取用户自定义的批改规则
         const correctionRules = await new Promise((resolve) => {
@@ -712,19 +777,21 @@ ${text}
 
 // 调用DeepSeek API的函数（修复编码问题）
 async function callDeepSeekAPI(message) {
-    // DeepSeek API Key - 用户的真实API密钥
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b";  // 用户的真实API密钥
     const API_URL = "https://api.deepseek.com/chat/completions";  // 官方API端点
     
+    // 从 chrome.storage 获取 API 密钥
+    const keys = await getApiKeys();
+    const API_KEY = keys.deepseek;
+    
     // 检查API Key
-    if (!API_KEY || API_KEY === "YOUR_NEW_API_KEY_HERE" || API_KEY === "YOUR_REAL_API_KEY_HERE") {
-        throw new Error("❌ API密钥未配置\n\n请按以下步骤配置：\n1. 访问 https://platform.deepseek.com\n2. 注册并获取API密钥\n3. 在background_fixed.js中替换API_KEY的值\n4. 确保账户有足够余额");
+    if (!API_KEY || !API_KEY.startsWith('sk-') || API_KEY.length < 35) {
+        throw new Error("❌ DeepSeek API密钥未配置或格式错误\n\n请按以下步骤配置：\n1. 点击插件图标打开弹窗\n2. 点击"设置"按钮\n3. 访问 https://platform.deepseek.com 获取API密钥\n4. 在设置页面输入密钥并保存（格式: sk-xxxxx...）\n5. 确保账户有足够余额");
     }
     
-    console.log('🚀 开始调用DeepSeek API...');
-    console.log('📝 消息内容:', message.substring(0, 100) + '...');
-    console.log('🔑 API Key状态:', API_KEY ? '已配置' : '未配置');
-    console.log('🌐 API URL:', API_URL);
+    debugLog('🚀 开始调用DeepSeek API...');
+    debugLog('📝 消息内容:', message.substring(0, 100) + '...');
+    debugLog('🔑 API Key状态: 已配置');
+    debugLog('🌐 API URL:', API_URL);
     
     try {
         const requestBody = {
@@ -1444,9 +1511,15 @@ function createFallbackKnowledgeGraph() {
 // 1. 生成页面摘要 (Markdown 格式，用于 Chat)
 // ==========================================
 async function generatePageSummary(pageData) {
-    // 你的 DeepSeek API Key
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b"; 
     const API_URL = "https://api.deepseek.com/chat/completions";
+    
+    // 从 chrome.storage 获取 API 密钥
+    const keys = await getApiKeys();
+    const API_KEY = keys.deepseek;
+    
+    if (!API_KEY || !API_KEY.startsWith('sk-') || API_KEY.length < 35) {
+        throw new Error("❌ DeepSeek API密钥未配置或格式错误。请在插件设置中配置正确的API密钥（格式: sk-xxxxx...）。");
+    }
     
     try {
         console.log('🤖 [Summary] 开始生成结构化课程分析...');
@@ -1514,9 +1587,15 @@ ${content}
 // 2. 深度页面分析 (JSON 格式，用于蓝色胶囊标签)
 // ==========================================
 async function analyzeContentWithDeepSeek(rawContent) {
-    // 🔴 记得替换你的 API Key
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b"; 
     const API_URL = "https://api.deepseek.com/chat/completions";
+    
+    // 从 chrome.storage 获取 API 密钥
+    const keys = await getApiKeys();
+    const API_KEY = keys.deepseek;
+    
+    if (!API_KEY || !API_KEY.startsWith('sk-') || API_KEY.length < 35) {
+        throw new Error("❌ DeepSeek API密钥未配置或格式错误。请在插件设置中配置正确的API密钥（格式: sk-xxxxx...）。");
+    }
 
     const prompt = `
 你是一个专业的课程内容分析师。请分析以下网页文本。

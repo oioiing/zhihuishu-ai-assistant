@@ -1,0 +1,33 @@
+# API Keys and Configuration
+config.local.js
+.env
+.env.local
+
+# Temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node modules (if added in future)
+node_modules/
+package-lock.json
+
+# Build outputs (if added in future)
+dist/
+build/
+*.zip
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*

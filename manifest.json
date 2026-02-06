@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "智慧树 AI 助教",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "基于 DeepSeek AI 的智能教学助手，帮助老师生成教案和批改建议",
   "permissions": [
     "activeTab",
@@ -29,7 +29,10 @@
       "matches": [
         "https://zhihuishu.com/*",
         "https://www.zhihuishu.com/*",
-        "https://*.zhihuishu.com/*"
+        "https://*.zhihuishu.com/*",
+        "https://zhihuishu.cn/*",
+        "https://www.zhihuishu.cn/*",
+        "https://*.zhihuishu.cn/*"
       ],
       "js": ["content.js"],
       "run_at": "document_end",
