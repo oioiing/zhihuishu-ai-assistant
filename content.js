@@ -294,6 +294,7 @@
 
     function createFunctionList(){
         const functions = [
+            { id: 'homeworkGrading', icon: '✅', text: '作业批改', color: '#FF4081' },
             { id: 'screenshot', icon: '📸', text: '截图批改', color: '#FF6B6B' },
             { id: 'autoDetect', icon: '🎯', text: '智能识别作业', color: '#FF9800' },
             { id: 'chat', icon: '💬', text: 'AI对话', color: '#66BB6A' },
@@ -518,6 +519,12 @@
         }
         
         switch(id){
+            case 'homeworkGrading':
+                animateRingStart(color);
+                showFloatingPanel('作业自动批改', color, '✅ 正在初始化批改系统...');
+                handleHomeworkGrading();
+                break;
+            
             case 'screenshot':
                 animateRingStart(color);
                 showFloatingPanel('截图批改', color, '📸 准备截图...');
@@ -1404,6 +1411,239 @@
         }
     }
     // ==========================================
+    // 8.5 作业自动批改功能
+    // ==========================================
+    
+    async function handleHomeworkGrading() {
+        console.log('✅ 开始作业自动批改...');
+        
+        try {
+            // 检查是否在作业页面
+            if (typeof window.homeworkGrader === 'undefined') {
+                updatePanelBody(`
+                    <div style="text-align:center; padding:30px; color:#666;">
+                        <div style="font-size:48px; margin-bottom:16px;">⚠️</div>
+                        <h3 style="margin:0 0 12px 0; color:#333;">批改系统未就绪</h3>
+                        <p style="font-size:14px; line-height:1.6; margin-bottom:20px;">
+                            批改系统模块加载失败。请刷新页面后重试。
+                        </p>
+                    </div>
+                `);
+                animateRingStop();
+                return;
+            }
+            
+            const grader = window.homeworkGrader;
+            
+            // 检查是否为作业页面
+            if (!grader.isHomeworkPage()) {
+                updatePanelBody(`
+                    <div style="text-align:center; padding:30px; color:#666;">
+                        <div style="font-size:48px; margin-bottom:16px;">📝</div>
+                        <h3 style="margin:0 0 12px 0; color:#333;">非作业批改页面</h3>
+                        <p style="font-size:14px; line-height:1.6; margin-bottom:20px;">
+                            当前页面不是作业批改页面。<br>
+                            请访问作业批改页面后使用此功能。
+                        </p>
+                        <div style="font-size:12px; color:#999; margin-top:20px;">
+                            支持的页面：<br>
+                            • hike-teaching-center.polymas.com/homeworkCorrect<br>
+                            • 包含作业内容的页面
+                        </div>
+                    </div>
+                `);
+                animateRingStop();
+                return;
+            }
+            
+            // 初始化批改会话
+            updatePanelBody(`
+                <div style="text-align:center; padding:20px;">
+                    <div style="font-size:48px; margin-bottom:16px;">🔍</div>
+                    <p>正在识别题目...</p>
+                </div>
+            `);
+            
+            const session = await grader.initializeSession();
+            
+            // 显示识别结果
+            updatePanelBody(`
+                <div style="padding:20px;">
+                    <h3 style="margin:0 0 16px 0; color:#333;">✅ 识别完成</h3>
+                    <div style="background:#f5f5f5; padding:15px; border-radius:8px; margin-bottom:16px;">
+                        <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:12px;">
+                            <div style="text-align:center;">
+                                <div style="font-size:24px; font-weight:bold; color:#FF4081;">
+                                    ${session.questions.length}
+                                </div>
+                                <div style="font-size:12px; color:#666; margin-top:4px;">总题数</div>
+                            </div>
+                            <div style="text-align:center;">
+                                <div style="font-size:24px; font-weight:bold; color:#4FC3F7;">
+                                    ${session.maxTotalScore}
+                                </div>
+                                <div style="font-size:12px; color:#666; margin-top:4px;">总分</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="background:#fff3e0; padding:12px; border-radius:6px; margin-bottom:16px; font-size:13px; line-height:1.6;">
+                        <strong>📋 题型分布：</strong><br>
+                        选择题、填空题、简答题已自动识别
+                    </div>
+                    
+                    <button id="zh-start-grading-btn" style="width:100%; padding:14px; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:white; border:none; border-radius:8px; cursor:pointer; font-size:15px; font-weight:600; margin-bottom:10px;">
+                        🚀 开始批改所有题目
+                    </button>
+                    
+                    <button id="zh-show-batch-panel-btn" style="width:100%; padding:12px; background:#f5f5f5; color:#666; border:none; border-radius:8px; cursor:pointer; font-size:14px;">
+                        📊 显示批改面板
+                    </button>
+                    
+                    <div style="margin-top:16px; padding-top:16px; border-top:1px solid #e5e7eb; font-size:12px; color:#999;">
+                        💡 提示：点击"开始批改"后，系统将自动批改所有题目并显示结果
+                    </div>
+                </div>
+            `);
+            
+            // 绑定按钮事件
+            document.getElementById('zh-start-grading-btn').addEventListener('click', async () => {
+                const btn = document.getElementById('zh-start-grading-btn');
+                btn.disabled = true;
+                btn.textContent = '⏳ 批改中，请稍候...';
+                
+                try {
+                    updatePanelBody(`
+                        <div style="padding:20px; text-align:center;">
+                            <div style="font-size:48px; margin-bottom:16px;">⚙️</div>
+                            <p style="font-size:16px; margin-bottom:20px;">正在批改题目...</p>
+                            <div style="width:100%; height:6px; background:#e0e0e0; border-radius:3px; overflow:hidden;">
+                                <div id="zh-grading-progress" style="width:0%; height:100%; background:linear-gradient(90deg, #667eea 0%, #764ba2 100%); transition:width 0.3s;"></div>
+                            </div>
+                            <div id="zh-grading-status" style="margin-top:12px; font-size:14px; color:#666;">
+                                正在初始化...
+                            </div>
+                        </div>
+                    `);
+                    
+                    await grader.gradeAllQuestions((current, total) => {
+                        const percentage = (current / total) * 100;
+                        const progressBar = document.getElementById('zh-grading-progress');
+                        const statusText = document.getElementById('zh-grading-status');
+                        
+                        if (progressBar) {
+                            progressBar.style.width = percentage + '%';
+                        }
+                        
+                        if (statusText) {
+                            statusText.textContent = `已批改 ${current}/${total} 题 (${Math.round(percentage)}%)`;
+                        }
+                    });
+                    
+                    // 显示完成结果
+                    const results = grader.getResults();
+                    const totalScore = results.reduce((sum, r) => sum + r.score, 0);
+                    const maxScore = results.reduce((sum, r) => sum + r.maxScore, 0);
+                    const passedCount = results.filter(r => r.passed).length;
+                    const percentage = Math.round((totalScore / maxScore) * 100);
+                    
+                    updatePanelBody(`
+                        <div style="padding:20px;">
+                            <div style="text-align:center; margin-bottom:20px;">
+                                <div style="font-size:48px; margin-bottom:12px;">✅</div>
+                                <h3 style="margin:0 0 8px 0; color:#333;">批改完成！</h3>
+                            </div>
+                            
+                            <div style="background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:white; padding:20px; border-radius:12px; margin-bottom:16px; text-align:center;">
+                                <div style="font-size:48px; font-weight:bold; margin-bottom:8px;">
+                                    ${percentage}%
+                                </div>
+                                <div style="font-size:16px; opacity:0.9;">
+                                    ${totalScore}/${maxScore} 分
+                                </div>
+                            </div>
+                            
+                            <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-bottom:16px;">
+                                <div style="background:#f5f5f5; padding:12px; border-radius:8px; text-align:center;">
+                                    <div style="font-size:20px; font-weight:bold; color:#66BB6A;">${passedCount}</div>
+                                    <div style="font-size:11px; color:#666; margin-top:4px;">通过</div>
+                                </div>
+                                <div style="background:#f5f5f5; padding:12px; border-radius:8px; text-align:center;">
+                                    <div style="font-size:20px; font-weight:bold; color:#FF6B6B;">${results.length - passedCount}</div>
+                                    <div style="font-size:11px; color:#666; margin-top:4px;">未通过</div>
+                                </div>
+                                <div style="background:#f5f5f5; padding:12px; border-radius:8px; text-align:center;">
+                                    <div style="font-size:20px; font-weight:bold; color:#4FC3F7;">${results.length}</div>
+                                    <div style="font-size:11px; color:#666; margin-top:4px;">总题数</div>
+                                </div>
+                            </div>
+                            
+                            <button id="zh-export-report-btn" style="width:100%; padding:12px; background:#66BB6A; color:white; border:none; border-radius:8px; cursor:pointer; font-size:14px; font-weight:600; margin-bottom:8px;">
+                                📥 导出批改报告
+                            </button>
+                            
+                            <button id="zh-close-result-btn" style="width:100%; padding:12px; background:#f5f5f5; color:#666; border:none; border-radius:8px; cursor:pointer; font-size:14px;">
+                                ✓ 完成
+                            </button>
+                            
+                            <div style="margin-top:16px; padding:12px; background:#e8f5e9; border-radius:6px; font-size:12px; color:#2e7d32;">
+                                💡 批改结果已显示在各题目下方，可滚动查看详细反馈
+                            </div>
+                        </div>
+                    `);
+                    
+                    // 绑定导出按钮
+                    document.getElementById('zh-export-report-btn').addEventListener('click', () => {
+                        grader.saveReport();
+                    });
+                    
+                    // 绑定关闭按钮
+                    document.getElementById('zh-close-result-btn').addEventListener('click', () => {
+                        const panel = document.getElementById('zhihuishu-ai-panel');
+                        if (panel) panel.remove();
+                    });
+                    
+                } catch (error) {
+                    console.error('❌ 批改失败:', error);
+                    updatePanelBody(`
+                        <div style="text-align:center; padding:30px; color:#666;">
+                            <div style="font-size:48px; margin-bottom:16px;">❌</div>
+                            <h3 style="margin:0 0 12px 0; color:#e53e3e;">批改失败</h3>
+                            <p style="font-size:14px; line-height:1.6; color:#666;">
+                                ${error.message || '未知错误'}
+                            </p>
+                            <button onclick="location.reload()" style="margin-top:20px; padding:10px 20px; background:#FF6B6B; color:white; border:none; border-radius:6px; cursor:pointer;">
+                                🔄 刷新页面
+                            </button>
+                        </div>
+                    `);
+                }
+                
+                animateRingStop();
+            });
+            
+            // 绑定显示面板按钮
+            document.getElementById('zh-show-batch-panel-btn').addEventListener('click', () => {
+                grader.showBatchPanel();
+            });
+            
+            animateRingStop();
+            
+        } catch (error) {
+            console.error('❌ 批改系统初始化失败:', error);
+            updatePanelBody(`
+                <div style="text-align:center; padding:30px; color:#666;">
+                    <div style="font-size:48px; margin-bottom:16px;">❌</div>
+                    <h3 style="margin:0 0 12px 0; color:#e53e3e;">初始化失败</h3>
+                    <p style="font-size:14px; line-height:1.6;">
+                        ${error.message || '未知错误'}
+                    </p>
+                </div>
+            `);
+            animateRingStop();
+        }
+    }
+    // ==========================================
     // 9. 智能识别作业区域功能
     // ==========================================
     
@@ -2036,3 +2276,22 @@
         bodyTextLength: document.body ? (document.body.innerText || '').length : 0,
         hasFloatingBall: !!document.getElementById('zhihuishu-ai-floating-ball')
     });
+    
+    // ==========================================
+    // 作业批改系统初始化
+    // ==========================================
+    console.log('🔧 初始化作业批改系统...');
+    
+    // 等待模块加载完成后初始化
+    setTimeout(() => {
+        if (typeof window.homeworkGrader !== 'undefined') {
+            console.log('✅ 作业批改系统已就绪');
+            
+            // 自动检测作业页面
+            if (window.homeworkGrader.isHomeworkPage()) {
+                console.log('📝 检测到作业页面');
+            }
+        } else {
+            console.warn('⚠️ 作业批改系统模块未加载');
+        }
+    }, 1000);

@@ -1,0 +1,23 @@
+{
+  "name": "zhihuishu-ai-assistant",
+  "version": "2.0.0",
+  "description": "智慧树 AI 助教 Chrome 扩展 - 支持作业自动批改",
+  "scripts": {
+    "build": "tsc && node build-bundle.js",
+    "watch": "tsc --watch",
+    "clean": "rm -rf dist homework-grading-bundle.js",
+    "prebuild": "npm run clean"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "keywords": [
+    "chrome-extension",
+    "education",
+    "ai",
+    "homework",
+    "grading"
+  ],
+  "author": "",
+  "license": "MIT"
+}
