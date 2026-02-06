@@ -386,8 +386,9 @@
                 const ocrKey = ocrKeyInput.value.trim();
                 const debugMode = debugModeInput.checked;
                 
-                if (!deepseekKey || deepseekKey.length < 10) {
-                    setStatus('❌ 请输入有效的 DeepSeek API Key', 'error');
+                // 验证 DeepSeek API Key 格式
+                if (!deepseekKey || !deepseekKey.startsWith('sk-') || deepseekKey.length < 35) {
+                    setStatus('❌ 请输入有效的 DeepSeek API Key (格式: sk-xxxxx...)', 'error');
                     return;
                 }
                 

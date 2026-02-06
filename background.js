@@ -624,8 +624,8 @@ async function analyzeTextContent(text) {
     const keys = await getApiKeys();
     const API_KEY = keys.deepseek;
     
-    if (!API_KEY || API_KEY.length < 10) {
-        throw new Error("❌ DeepSeek API密钥未配置。请在插件设置中配置API密钥。");
+    if (!API_KEY || !API_KEY.startsWith('sk-') || API_KEY.length < 35) {
+        throw new Error("❌ DeepSeek API密钥未配置或格式错误。请在插件设置中配置正确的API密钥（格式: sk-xxxxx...）。");
     }
     
     try {
@@ -784,8 +784,8 @@ async function callDeepSeekAPI(message) {
     const API_KEY = keys.deepseek;
     
     // 检查API Key
-    if (!API_KEY || API_KEY.length < 10) {
-        throw new Error("❌ DeepSeek API密钥未配置\n\n请按以下步骤配置：\n1. 点击插件图标打开弹窗\n2. 点击"设置"按钮\n3. 访问 https://platform.deepseek.com 获取API密钥\n4. 在设置页面输入密钥并保存\n5. 确保账户有足够余额");
+    if (!API_KEY || !API_KEY.startsWith('sk-') || API_KEY.length < 35) {
+        throw new Error("❌ DeepSeek API密钥未配置或格式错误\n\n请按以下步骤配置：\n1. 点击插件图标打开弹窗\n2. 点击"设置"按钮\n3. 访问 https://platform.deepseek.com 获取API密钥\n4. 在设置页面输入密钥并保存（格式: sk-xxxxx...）\n5. 确保账户有足够余额");
     }
     
     debugLog('🚀 开始调用DeepSeek API...');
@@ -1517,8 +1517,8 @@ async function generatePageSummary(pageData) {
     const keys = await getApiKeys();
     const API_KEY = keys.deepseek;
     
-    if (!API_KEY || API_KEY.length < 10) {
-        throw new Error("❌ DeepSeek API密钥未配置。请在插件设置中配置API密钥。");
+    if (!API_KEY || !API_KEY.startsWith('sk-') || API_KEY.length < 35) {
+        throw new Error("❌ DeepSeek API密钥未配置或格式错误。请在插件设置中配置正确的API密钥（格式: sk-xxxxx...）。");
     }
     
     try {
@@ -1593,8 +1593,8 @@ async function analyzeContentWithDeepSeek(rawContent) {
     const keys = await getApiKeys();
     const API_KEY = keys.deepseek;
     
-    if (!API_KEY || API_KEY.length < 10) {
-        throw new Error("❌ DeepSeek API密钥未配置。请在插件设置中配置API密钥。");
+    if (!API_KEY || !API_KEY.startsWith('sk-') || API_KEY.length < 35) {
+        throw new Error("❌ DeepSeek API密钥未配置或格式错误。请在插件设置中配置正确的API密钥（格式: sk-xxxxx...）。");
     }
 
     const prompt = `

@@ -154,7 +154,7 @@ console.log('📊 代码统计...');
 console.log();
 
 // 总结
-console.log('=' .repeat(50));
+console.log('='.repeat(50));
 if (hasErrors) {
     console.log('❌ 验证失败：发现错误');
     process.exit(1);
