@@ -130,6 +130,91 @@
             text-align: center;
             line-height: 1.4;
         }
+
+        /* 设置面板 */
+        .settings-panel {
+            display: none;
+            width: 100%;
+            margin-top: 12px;
+            padding: 16px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 12px;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+        }
+
+        .settings-panel.active {
+            display: block;
+        }
+
+        .settings-panel .section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 8px;
+        }
+
+        .settings-panel .input-group {
+            margin-bottom: 12px;
+        }
+
+        .settings-panel label {
+            display: block;
+            font-size: 11px;
+            color: #6c757d;
+            margin-bottom: 4px;
+        }
+
+        .settings-panel input[type="text"],
+        .settings-panel input[type="password"] {
+            width: 100%;
+            padding: 8px 12px;
+            font-size: 12px;
+            border: 1px solid rgba(0, 0, 0, 0.15);
+            border-radius: 8px;
+            background: #fff;
+            transition: all 0.2s;
+        }
+
+        .settings-panel input:focus {
+            outline: none;
+            border-color: #10b981;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+        }
+
+        .settings-panel .btn-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        .settings-panel button {
+            flex: 1;
+            padding: 8px 16px;
+            font-size: 12px;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .settings-panel .btn-save {
+            background: #10b981;
+            color: white;
+        }
+
+        .settings-panel .btn-save:hover {
+            background: #059669;
+        }
+
+        .settings-panel .btn-cancel {
+            background: #e5e7eb;
+            color: #6c757d;
+        }
+
+        .settings-panel .btn-cancel:hover {
+            background: #d1d5db;
+        }
     </style>
 </head>
 <body>
@@ -170,6 +255,39 @@
                 <div class="desc">网页右侧悬浮球，快捷使用上述功能</div>
             </div>
         </div>
+        <div class="feature-row" data-action="settings">
+            <span class="icon">⚙️</span>
+            <div class="body">
+                <div class="title">设置</div>
+                <div class="desc">配置 API 密钥和选项</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="settings-panel" id="settings-panel">
+        <div class="section-title">API 密钥配置</div>
+        
+        <div class="input-group">
+            <label for="deepseek-key">DeepSeek API Key</label>
+            <input type="password" id="deepseek-key" placeholder="sk-xxxxxxxxxxxxxxxx">
+        </div>
+
+        <div class="input-group">
+            <label for="ocr-key">OCR.space API Key (可选)</label>
+            <input type="password" id="ocr-key" placeholder="xxxxxxxxxxxxxxxx">
+        </div>
+
+        <div class="input-group">
+            <label>
+                <input type="checkbox" id="debug-mode">
+                启用调试模式（控制台显示详细日志）
+            </label>
+        </div>
+
+        <div class="btn-group">
+            <button class="btn-save" id="save-settings">保存</button>
+            <button class="btn-cancel" id="cancel-settings">取消</button>
+        </div>
     </div>
 
     <div class="status" id="status">✅ 插件已加载</div>
@@ -182,6 +300,23 @@
             console.log('DOM加载完成');
             
             const status = document.getElementById('status');
+            const settingsPanel = document.getElementById('settings-panel');
+            const deepseekKeyInput = document.getElementById('deepseek-key');
+            const ocrKeyInput = document.getElementById('ocr-key');
+            const debugModeInput = document.getElementById('debug-mode');
+            
+            // 加载已保存的设置
+            chrome.storage.sync.get(['deepseekApiKey', 'ocrApiKey', 'debugMode'], function(result) {
+                if (result.deepseekApiKey) {
+                    deepseekKeyInput.value = result.deepseekApiKey;
+                }
+                if (result.ocrApiKey) {
+                    ocrKeyInput.value = result.ocrApiKey;
+                }
+                if (result.debugMode) {
+                    debugModeInput.checked = result.debugMode;
+                }
+            });
             
             function setStatus(msg, type) {
                 if (status) {
@@ -198,6 +333,10 @@
                         status.style.color = '#f59e0b';
                         status.style.backgroundColor = 'rgba(245, 158, 11, 0.15)';
                         status.style.borderColor = 'rgba(245, 158, 11, 0.25)';
+                    } else if (type === 'error') {
+                        status.style.color = '#ef4444';
+                        status.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+                        status.style.borderColor = 'rgba(239, 68, 68, 0.25)';
                     }
                 }
             }
@@ -208,6 +347,19 @@
                 row.addEventListener('click', function() {
                     const action = row.getAttribute('data-action');
                     console.log('点击功能:', action);
+                    
+                    if (action === 'settings') {
+                        // 切换设置面板显示
+                        const isActive = settingsPanel.classList.contains('active');
+                        if (isActive) {
+                            settingsPanel.classList.remove('active');
+                            setStatus('✅ 插件界面已就绪', 'ok');
+                        } else {
+                            settingsPanel.classList.add('active');
+                            setStatus('⚙️ 配置 API 密钥', 'ok');
+                        }
+                        return;
+                    }
                     
                     switch(action) {
                         case 'screenshot':
@@ -226,6 +378,39 @@
                             setStatus('⚠️ 未知功能', 'warn');
                     }
                 });
+            });
+
+            // 保存设置
+            document.getElementById('save-settings').addEventListener('click', function() {
+                const deepseekKey = deepseekKeyInput.value.trim();
+                const ocrKey = ocrKeyInput.value.trim();
+                const debugMode = debugModeInput.checked;
+                
+                if (!deepseekKey || deepseekKey.length < 10) {
+                    setStatus('❌ 请输入有效的 DeepSeek API Key', 'error');
+                    return;
+                }
+                
+                chrome.storage.sync.set({
+                    deepseekApiKey: deepseekKey,
+                    ocrApiKey: ocrKey,
+                    debugMode: debugMode
+                }, function() {
+                    console.log('设置已保存');
+                    settingsPanel.classList.remove('active');
+                    setStatus('✅ 设置保存成功！', 'ok');
+                    
+                    // 通知 background script 重新加载配置
+                    chrome.runtime.sendMessage({ action: 'reloadConfig' }, function(response) {
+                        console.log('配置重载响应:', response);
+                    });
+                });
+            });
+
+            // 取消设置
+            document.getElementById('cancel-settings').addEventListener('click', function() {
+                settingsPanel.classList.remove('active');
+                setStatus('✅ 插件界面已就绪', 'ok');
             });
 
             setStatus('✅ 插件界面已就绪', 'ok');
