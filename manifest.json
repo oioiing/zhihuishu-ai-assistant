@@ -29,9 +29,13 @@
       "matches": [
         "https://zhihuishu.com/*",
         "https://www.zhihuishu.com/*",
-        "https://*.zhihuishu.com/*"
+        "https://*.zhihuishu.com/*",
+        "https://hike-teaching-center.polymas.com/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "homework-grading-bundle.js",
+        "content.js"
+      ],
       "run_at": "document_end",
       "all_frames": false
     }
