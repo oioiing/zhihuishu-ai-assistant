@@ -29,7 +29,10 @@
       "matches": [
         "https://zhihuishu.com/*",
         "https://www.zhihuishu.com/*",
-        "https://*.zhihuishu.com/*"
+        "https://*.zhihuishu.com/*",
+        "https://zhihuishu.cn/*",
+        "https://www.zhihuishu.cn/*",
+        "https://*.zhihuishu.cn/*"
       ],
       "js": ["content.js"],
       "run_at": "document_end",
