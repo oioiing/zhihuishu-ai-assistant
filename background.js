@@ -14,14 +14,14 @@ chrome.action.onClicked.addListener(async (tab) => {
 // 监听来自侧边栏的消息
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('🔔 收到消息:', request.action, request);
-    
+
     switch (request.action) {
         case 'ping':
             // 简单的ping响应，用于测试连接
             console.log('📡 Ping请求，发送pong响应');
             sendResponse({ success: true, message: 'pong', timestamp: Date.now() });
             return true;
-            
+
         case 'callDeepSeekAPI':
             callDeepSeekAPI(request.message)
                 .then(response => {
@@ -29,8 +29,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 })
                 .catch(error => {
                     console.error('DeepSeek API调用失败:', error);
-                    sendResponse({ 
-                        success: false, 
+                    sendResponse({
+                        success: false,
                         error: error.message,
                         details: {
                             name: error.name,
@@ -40,7 +40,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     });
                 });
             return true;
-            
+
         case 'captureScreen':
             console.log('开始截图请求...');
             captureScreenSimple()
@@ -50,13 +50,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 })
                 .catch(error => {
                     console.error('截图失败:', error);
-                    sendResponse({ 
-                        success: false, 
+                    sendResponse({
+                        success: false,
                         error: error.message || '截图功能暂时不可用，请确保页面已完全加载并重试。'
                     });
                 });
             return true;
-            
+
         case 'analyzeImage':
             analyzeImageWithAI(request.imageData)
                 .then(response => {
@@ -66,7 +66,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ success: false, error: error.message });
                 });
             return true;
-            
+
+        case 'analyzeHomeworkDOM':
+            analyzeHomeworkDOMWithAI(request.content)
+                .then(response => {
+                    sendResponse({ success: true, data: response });
+                })
+                .catch(error => {
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true;
+
         case 'analyzeHomework':
             analyzeHomeworkWithAI(request.imageData, request.selectionInfo)
                 .then(response => {
@@ -76,7 +86,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ success: false, error: error.message });
                 });
             return true;
-            
+
         case 'buildKnowledgeGraph':
             // 直接使用当前页面URL构建知识图谱
             buildKnowledgeGraphInBrowser(request.url || 'current_page')
@@ -89,13 +99,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     const fallbackGraph = createFallbackKnowledgeGraph();
                     sendResponse({ success: true, data: fallbackGraph });
                 });
-            return true; 
+            return true;
 
         case 'analyzePageContent':
             (async () => {
                 try {
                     console.log('🚀 收到分析请求，开始处理...');
-                    
+
                     // 1. 确定要分析的文本
                     let textToAnalyze = request.content;
 
@@ -114,15 +124,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
                     // 3. 调用 AI 分析
                     const aiResult = await analyzeContentWithDeepSeek(textToAnalyze);
-                    
+
                     // 4. 发送成功结果
                     sendResponse({ success: true, data: aiResult });
 
                 } catch (error) {
                     console.error('❌ 分析流程失败:', error);
                     // 返回具体的错误信息，这样你就知道是哪里挂了，而不是显示默认的英语数据
-                    sendResponse({ 
-                        success: false, 
+                    sendResponse({
+                        success: false,
                         error: `分析失败: ${error.message}`,
                         // 强制覆盖前端的默认数据，显示错误原因
                         data: {
@@ -142,7 +152,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 contentLength: request.pageData?.content?.length,
                 wordCount: request.pageData?.wordCount
             });
-            
+
             generatePageSummary(request.pageData)
                 .then(summary => {
                     console.log('✅ 摘要生成成功，长度:', summary.length);
@@ -150,9 +160,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 })
                 .catch(error => {
                     console.error('❌ 摘要生成失败:', error);
-                    sendResponse({ 
-                        success: false, 
-                        error: error.message || '摘要生成失败，请稍后重试' 
+                    sendResponse({
+                        success: false,
+                        error: error.message || '摘要生成失败，请稍后重试'
                     });
                 });
             return true;
@@ -165,7 +175,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }
             });
             return true;
-            
+
         default:
             sendResponse({ error: 'Unknown action type' });
     }
@@ -193,16 +203,48 @@ async function captureScreenSimple() {
     }
 }
 
+// 修复缺失的函数：截图作业分析
+async function analyzeHomeworkWithAI(imageData, selectionInfo) {
+    console.log('开始分析截图作业，区域信息:', selectionInfo);
+    return analyzeImageWithAI(imageData);
+}
+
+// 新增：基于 DOM 提取内容的作业分析
+async function analyzeHomeworkDOMWithAI(extractedText) {
+    try {
+        console.log('开始分析 DOM 提取的作业内容，文字长度:', extractedText.length);
+
+        // 获取用户自定义的批改规则
+        const correctionRules = await new Promise((resolve) => {
+            chrome.storage.local.get(['correctionRules'], (result) => {
+                resolve(result.correctionRules || {
+                    focusAreas: ['语法', '拼写', '标点'],
+                    strictness: 'medium',
+                    customInstructions: ''
+                });
+            });
+        });
+
+        console.log('📋 使用批改规则:', correctionRules);
+
+        // 调用通用分析函数
+        return analyzeTextContent(extractedText);
+    } catch (error) {
+        console.error('DOM 作业分析失败:', error);
+        throw error;
+    }
+}
+
 // 图像分析函数（增强版本 - 集成OCR和AI分析）
 async function analyzeImageWithAI(imageData) {
     try {
         console.log('=== 开始图像分析流程 ===');
         console.log('图片数据长度:', imageData.length);
         console.log('图片格式:', imageData.substring(0, 50));
-        
+
         // 第一步：使用OCR识别图片中的文字
         const extractedText = await performOCR(imageData);
-        
+
         if (!extractedText || extractedText.trim().length === 0) {
             return `
 📸 **截图分析结果**
@@ -216,7 +258,7 @@ async function analyzeImageWithAI(imageData) {
 
 **可能的原因：**
 • 图片中的文字不够清晰
-• 字体过小或模糊  
+• 字体过小或模糊
 • 背景干扰较多
 • OCR服务暂时不可用
 
@@ -226,14 +268,14 @@ async function analyzeImageWithAI(imageData) {
 3. 🖼️ 选择对比度较高的区域截图
             `;
         }
-        
+
         console.log('OCR识别成功，文字长度:', extractedText.length);
         console.log('识别到的文字预览:', extractedText.substring(0, 100));
-        
+
         // 第二步：使用AI分析识别出的文字内容
         console.log('开始AI分析...');
         const analysisResult = await analyzeTextContent(extractedText);
-        
+
         return `
 📸 **截图批改分析完成！**
 
@@ -244,7 +286,7 @@ ${extractedText}
 
 ${analysisResult}
         `;
-        
+
     } catch (error) {
         console.error('图像分析失败:', error);
         return `
@@ -268,14 +310,14 @@ ${analysisResult}
 async function performOCR(imageData) {
     try {
         console.log('开始OCR文字识别，图片大小:', imageData.length);
-        
+
         // 尝试多种语言识别
         const languages = ['chs', 'eng', 'cht']; // 简体中文、英文、繁体中文
-        
+
         for (let i = 0; i < languages.length; i++) {
             const lang = languages[i];
             console.log(`尝试${lang}语言识别...`);
-            
+
             try {
                 const ocrResult = await callOnlineOCRWithLanguage(imageData, lang);
                 if (ocrResult && ocrResult.trim().length > 0) {
@@ -289,10 +331,10 @@ async function performOCR(imageData) {
                 // 继续尝试下一种语言
             }
         }
-        
+
         // 所有语言都失败，返回错误
         throw new Error('无法识别图片中的文字内容。请确保：\n1. 图片中包含清晰的文字\n2. 文字大小适中，不要太小\n3. 背景与文字有足够对比度');
-        
+
     } catch (error) {
         console.error('OCR识别完全失败:', error);
         throw error;
@@ -303,10 +345,10 @@ async function performOCR(imageData) {
 async function callOnlineOCRWithLanguage(imageData, language) {
     try {
         console.log(`调用${language}语言OCR服务...`);
-        
+
         // 将base64数据转换为可用格式
         const base64Data = imageData.split(',')[1];
-        
+
         const formData = new FormData();
         formData.append('base64Image', `data:image/png;base64,${base64Data}`);
         formData.append('apikey', 'helloworld');
@@ -315,28 +357,28 @@ async function callOnlineOCRWithLanguage(imageData, language) {
         formData.append('detectOrientation', 'true');
         formData.append('scale', 'true');
         formData.append('OCREngine', '2');
-        
+
         const ocrResponse = await fetch('https://api.ocr.space/parse/image', {
             method: 'POST',
             body: formData
         });
-        
+
         if (!ocrResponse.ok) {
             throw new Error(`OCR API请求失败: ${ocrResponse.status}`);
         }
-        
+
         const ocrData = await ocrResponse.json();
         console.log(`${language}语言OCR响应:`, ocrData);
-        
+
         if (ocrData.OCRExitCode === 1 && ocrData.ParsedResults && ocrData.ParsedResults.length > 0) {
             const extractedText = ocrData.ParsedResults[0].ParsedText;
             if (extractedText && extractedText.trim().length > 0) {
                 return extractedText.trim();
             }
         }
-        
+
         throw new Error(`${language}语言未识别到文字内容`);
-        
+
     } catch (error) {
         throw new Error(`${language}语言OCR失败: ${error.message}`);
     }
@@ -347,55 +389,55 @@ function formatOCRText(rawText, language = 'auto') {
     if (!rawText || rawText.trim().length === 0) {
         return rawText;
     }
-    
+
     let formatted = rawText.trim();
-    
+
     // 1. 处理换行和空格
     formatted = formatted.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    
+
     // 2. 根据语言类型进行不同的处理
     if (language === 'chs' || language === 'cht' || /[\u4e00-\u9fff]/.test(formatted)) {
         // 中文文本处理
         console.log('检测到中文内容，使用中文排版规则');
-        
+
         // 处理中文标点符号
         formatted = formatted.replace(/\s*([，。！？；：])\s*/g, '$1');
-        
+
         // 处理中英文混合时的空格
         formatted = formatted.replace(/([a-zA-Z0-9])\s*([，。！？；：])/g, '$1$2');
         formatted = formatted.replace(/([，。！？；：])\s*([a-zA-Z0-9])/g, '$1 $2');
-        
+
         // 中英文之间添加空格
         formatted = formatted.replace(/([a-zA-Z0-9])([\u4e00-\u9fff])/g, '$1 $2');
         formatted = formatted.replace(/([\u4e00-\u9fff])([a-zA-Z0-9])/g, '$1 $2');
-        
+
         // 处理段落
         formatted = formatted.replace(/\n{3,}/g, '\n\n');
-        
+
     } else {
         // 英文文本处理
         console.log('检测到英文内容，使用英文排版规则');
-        
+
         // 合并被错误分割的单词
         formatted = formatted.replace(/([a-z])\s+([a-z])/g, '$1$2');
         formatted = formatted.replace(/([A-Z])\s+([a-z])/g, '$1$2');
-        
+
         // 修复句子间的空格
         formatted = formatted.replace(/([.!?])\s*\n\s*/g, '$1\n\n');
         formatted = formatted.replace(/([.!?])\s+([A-Z])/g, '$1 $2');
-        
+
         // 处理段落
         formatted = formatted.replace(/\n{3,}/g, '\n\n');
         formatted = formatted.replace(/\n\s+/g, '\n');
-        
+
         // 修复常见的OCR错误
         formatted = formatted.replace(/\s+/g, ' ');
         formatted = formatted.replace(/([a-z])([A-Z])/g, '$1 $2');
-        
+
         // 处理标点符号
         formatted = formatted.replace(/\s+([,.!?;:])/g, '$1');
         formatted = formatted.replace(/([,.!?;:])\s*([a-zA-Z])/g, '$1 $2');
-        
+
         // 处理段落开头
         const lines = formatted.split('\n');
         const processedLines = lines.map(line => {
@@ -407,13 +449,13 @@ function formatOCRText(rawText, language = 'auto') {
         });
         formatted = processedLines.join('\n');
     }
-    
+
     // 通用清理
     formatted = formatted.replace(/\s+$/gm, ''); // 去除行尾空格
     formatted = formatted.trim();
-    
+
     console.log('OCR文字排版完成，原长度:', rawText.length, '排版后长度:', formatted.length);
-    
+
     return formatted;
 }
 
@@ -422,10 +464,10 @@ function formatOCRText(rawText, language = 'auto') {
 async function performLocalOCR(imageData) {
     try {
         console.log('尝试备用OCR服务...');
-        
+
         // 尝试使用不同的API endpoint或参数
         const languages = ['chs', 'eng'];
-        
+
         for (const lang of languages) {
             try {
                 const result = await tryAlternativeOCR(imageData, lang);
@@ -436,9 +478,9 @@ async function performLocalOCR(imageData) {
                 console.log(`备用OCR ${lang}语言失败:`, error.message);
             }
         }
-        
+
         throw new Error('所有备用OCR服务都无法识别');
-        
+
     } catch (error) {
         console.error('备用OCR失败:', error);
         throw new Error('OCR识别失败，请确保图片包含清晰的文字，或手动输入内容进行批改');
@@ -450,17 +492,17 @@ async function tryAlternativeOCR(imageData, language = 'chs') {
     try {
         const response = await fetch(imageData);
         const blob = await response.blob();
-        
+
         const formData = new FormData();
         formData.append('file', blob, 'screenshot.png');
         formData.append('apikey', 'helloworld');
         formData.append('language', language);
-        
+
         const ocrResponse = await fetch('https://api.ocr.space/parse/image', {
             method: 'POST',
             body: formData
         });
-        
+
         if (ocrResponse.ok) {
             const result = await ocrResponse.json();
             if (result.ParsedResults && result.ParsedResults[0]) {
@@ -470,9 +512,9 @@ async function tryAlternativeOCR(imageData, language = 'chs') {
                 }
             }
         }
-        
+
         throw new Error(`备用OCR ${language}语言服务无法识别`);
-        
+
     } catch (error) {
         console.error(`备用OCR ${language}失败:`, error);
         throw error;
@@ -481,12 +523,12 @@ async function tryAlternativeOCR(imageData, language = 'chs') {
 
 // 分析文字内容（使用自定义批改规则）
 async function analyzeTextContent(text) {
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b";  // 用户的真实API密钥
+    const API_KEY = "YOUR_API_KEY_HERE";  // 用户的真实API密钥
     const API_URL = "https://api.deepseek.com/chat/completions";
-    
+
     try {
         console.log('开始AI分析，文字长度:', text.length);
-        
+
         // 获取用户自定义的批改规则
         const correctionRules = await new Promise((resolve) => {
             chrome.storage.local.get(['correctionRules'], (result) => {
@@ -497,23 +539,23 @@ async function analyzeTextContent(text) {
                 });
             });
         });
-        
+
         console.log('📋 使用批改规则:', correctionRules);
-        
+
         // 根据严格程度设置提示词
         const strictnessPrompts = {
             lenient: '请以鼓励为主，指出主要优点，对小错误给予宽容，提供建设性建议。',
             medium: '请平衡指出优点和需要改进的地方，提供具体的修改建议。',
             strict: '请进行细致的批改，指出所有错误和不足，提供详细的改进方案。'
         };
-        
+
         const strictnessPrompt = strictnessPrompts[correctionRules.strictness] || strictnessPrompts.medium;
-        
+
         // 构建批改重点提示
-        const focusAreasText = correctionRules.focusAreas.length > 0 
-            ? `重点关注：${correctionRules.focusAreas.join('、')}` 
+        const focusAreasText = correctionRules.focusAreas.length > 0
+            ? `重点关注：${correctionRules.focusAreas.join('、')}`
             : '全面批改';
-        
+
         // 构建完整的分析提示词
         const analysisPrompt = `
 请作为专业的教师，根据以下要求批改作业内容：
@@ -533,7 +575,7 @@ ${text}
 
 **📊 评分建议（满分100分）**
 • 内容相关性：_/25分
-• 语法准确性：_/25分  
+• 语法准确性：_/25分
 • 词汇使用：_/20分
 • 文章结构：_/15分
 • 拼写标点：_/15分
@@ -551,7 +593,7 @@ ${correctionRules.focusAreas.length > 0 ? `特别关注${correctionRules.focusAr
 **📚 学习建议**
 针对性的学习建议和练习方法
         `;
-        
+
         const requestBody = {
             model: "deepseek-chat",
             messages: [
@@ -567,9 +609,9 @@ ${correctionRules.focusAreas.length > 0 ? `特别关注${correctionRules.focusAr
             temperature: 0.7,
             max_tokens: 2000
         };
-        
+
         console.log('发送API请求...');
-        
+
         const response = await fetch(API_URL, {
             method: 'POST',
             headers: {
@@ -578,27 +620,27 @@ ${correctionRules.focusAreas.length > 0 ? `特别关注${correctionRules.focusAr
             },
             body: JSON.stringify(requestBody)
         });
-        
+
         console.log('API响应状态:', response.status);
-        
+
         if (!response.ok) {
             const errorText = await response.text();
             console.error('API错误响应:', errorText);
             throw new Error(`API请求失败: ${response.status} - ${response.statusText}`);
         }
-        
+
         const data = await response.json();
         console.log('API响应成功');
-        
+
         if (!data.choices || !data.choices[0] || !data.choices[0].message) {
             throw new Error('API响应格式错误');
         }
-        
+
         return data.choices[0].message.content;
-        
+
     } catch (error) {
         console.error('AI分析失败:', error);
-        
+
         // 提供更详细的错误信息
         if (error.message.includes('Failed to fetch')) {
             return `**❌ 网络连接失败**
@@ -634,19 +676,19 @@ ${text}
 // 调用DeepSeek API的函数（修复编码问题）
 async function callDeepSeekAPI(message) {
     // DeepSeek API Key - 用户的真实API密钥
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b";  // 用户的真实API密钥
+    const API_KEY = "YOUR_API_KEY_HERE";  // 用户的真实API密钥
     const API_URL = "https://api.deepseek.com/chat/completions";  // 官方API端点
-    
+
     // 检查API Key
     if (!API_KEY || API_KEY === "YOUR_NEW_API_KEY_HERE" || API_KEY === "YOUR_REAL_API_KEY_HERE") {
         throw new Error("❌ API密钥未配置\n\n请按以下步骤配置：\n1. 访问 https://platform.deepseek.com\n2. 注册并获取API密钥\n3. 在background_fixed.js中替换API_KEY的值\n4. 确保账户有足够余额");
     }
-    
+
     console.log('🚀 开始调用DeepSeek API...');
     console.log('📝 消息内容:', message.substring(0, 100) + '...');
     console.log('🔑 API Key状态:', API_KEY ? '已配置' : '未配置');
     console.log('🌐 API URL:', API_URL);
-    
+
     try {
         const requestBody = {
             model: "deepseek-chat",
@@ -664,7 +706,7 @@ async function callDeepSeekAPI(message) {
             max_tokens: 1000,
             stream: false
         };
-        
+
         console.log('📤 发送请求到:', API_URL);
         console.log('📊 请求体大小:', JSON.stringify(requestBody).length, 'bytes');
         console.log('🔧 请求配置:', {
@@ -675,7 +717,7 @@ async function callDeepSeekAPI(message) {
                 'User-Agent': 'ZhihuishuAI/1.0.0'
             }
         });
-        
+
         const startTime = Date.now();
         const response = await fetch(API_URL, {
             method: 'POST',
@@ -686,22 +728,22 @@ async function callDeepSeekAPI(message) {
             },
             body: JSON.stringify(requestBody)
         });
-        
+
         const endTime = Date.now();
         const responseTime = endTime - startTime;
-        
+
         console.log('📥 API响应状态:', response.status, response.statusText);
         console.log('⏱️ 响应时间:', responseTime, 'ms');
         console.log('📋 响应头:', Object.fromEntries(response.headers.entries()));
-        
+
         if (!response.ok) {
             const errorText = await response.text();
             console.error('❌ API错误响应内容:', errorText);
-            
+
             // 根据状态码提供更具体的错误信息
             let errorMessage = `API请求失败 (${response.status})`;
             let solution = '';
-            
+
             if (response.status === 401) {
                 errorMessage = '🔑 API密钥认证失败';
                 solution = `
@@ -749,10 +791,10 @@ async function callDeepSeekAPI(message) {
 2. 确认消息长度不超过限制
 3. 检查模型名称是否正确`;
             }
-            
+
             throw new Error(`${errorMessage}\n\n${solution}\n\n详细错误信息: ${errorText}`);
         }
-        
+
         const data = await response.json();
         console.log('✅ API响应成功，数据大小:', JSON.stringify(data).length, 'bytes');
         console.log('📊 响应数据结构:', {
@@ -760,17 +802,17 @@ async function callDeepSeekAPI(message) {
             usage: data.usage || 'N/A',
             model: data.model || 'N/A'
         });
-        
+
         if (!data.choices || !data.choices[0] || !data.choices[0].message) {
             console.error('❌ API响应格式异常:', data);
             throw new Error('API响应格式错误，未找到有效内容\n\n可能原因：\n• 服务器返回了异常格式\n• 模型输出被过滤\n• 网络传输中断\n\n建议重试或联系技术支持');
         }
-        
+
         const result = data.choices[0].message.content;
         console.log('🎉 API调用成功，返回内容长度:', result.length);
-        
+
         return result;
-        
+
     } catch (error) {
         console.error('💥 DeepSeek API调用详细错误:', {
             name: error.name,
@@ -778,7 +820,7 @@ async function callDeepSeekAPI(message) {
             stack: error.stack,
             timestamp: new Date().toISOString()
         });
-        
+
         // 网络连接错误的特殊处理
         if (error.name === 'TypeError' && error.message.includes('fetch')) {
             throw new Error(`🌐 网络连接失败
@@ -821,26 +863,26 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 async function buildKnowledgeGraphInBrowser(url) {
     try {
         console.log('开始在浏览器中构建知识图谱，URL:', url);
-        
+
         // 获取页面内容（包括图片）
         const pageContent = await extractPageContentInBrowser();
-        
+
         if (!pageContent) {
             throw new Error('无法获取页面内容');
         }
-        
+
         console.log('页面内容提取成功:', {
             title: pageContent.title,
             contentLength: pageContent.content.length,
             imageCount: pageContent.images ? pageContent.images.length : 0
         });
-        
+
         let allContent = pageContent.content;
-        
+
         // 如果有图片，进行OCR识别并加入内容
         if (pageContent.images && pageContent.images.length > 0) {
             console.log(`发现${pageContent.images.length}张图片，开始OCR识别...`);
-            
+
             for (const image of pageContent.images) {
                 if (image.dataURL) {
                     try {
@@ -858,25 +900,25 @@ async function buildKnowledgeGraphInBrowser(url) {
                 }
             }
         }
-        
+
         // 基于完整内容（文本+图片）构建知识图谱
         const enhancedPageContent = {
             title: pageContent.title,
             content: allContent,
             url: pageContent.url
         };
-        
+
         console.log('开始构建知识图谱，总内容长度:', allContent.length);
         const graphData = buildKnowledgeGraphFromContent(enhancedPageContent);
-        
+
         console.log('知识图谱构建成功:', {
             nodeCount: graphData.nodes.length,
             edgeCount: graphData.edges.length,
             title: graphData.metadata.title
         });
-        
+
         return graphData;
-        
+
     } catch (error) {
         console.error('构建知识图谱失败:', error);
         throw error;
@@ -887,21 +929,21 @@ async function buildKnowledgeGraphInBrowser(url) {
 async function analyzePageContentInBrowser(url) {
     try {
         console.log('开始在浏览器中分析页面内容，URL:', url);
-        
+
         // 获取页面内容（包括图片）
         const pageContent = await extractPageContentInBrowser();
-        
+
         if (!pageContent) {
             throw new Error('无法获取页面内容');
         }
-        
+
         let allContent = pageContent.content;
         const imageTexts = [];
-        
+
         // 如果有图片，进行OCR识别
         if (pageContent.images && pageContent.images.length > 0) {
             console.log(`发现${pageContent.images.length}张图片，开始OCR识别...`);
-            
+
             for (const image of pageContent.images) {
                 if (image.dataURL) {
                     try {
@@ -915,7 +957,7 @@ async function analyzePageContentInBrowser(url) {
                                 width: image.width,
                                 height: image.height
                             });
-                            
+
                             // 将图片文字加入总内容
                             allContent += `\n\n[图片内容: ${image.alt || '图片'}]\n${imageText}`;
                         }
@@ -929,13 +971,13 @@ async function analyzePageContentInBrowser(url) {
                 }
             }
         }
-        
+
         // 分析关键词（基于文本+图片内容）
         const keywords = extractKeywordsFromText(allContent);
-        
+
         // 生成摘要
         const summary = generateSummary(allContent);
-        
+
         const result = {
             title: pageContent.title,
             content: summary,
@@ -943,10 +985,10 @@ async function analyzePageContentInBrowser(url) {
             images: imageTexts,
             url: url
         };
-        
+
         console.log('页面内容分析成功，包含图片识别结果');
         return result;
-        
+
     } catch (error) {
         console.error('分析页面内容失败:', error);
         throw error;
@@ -959,35 +1001,35 @@ async function extractPageContentInBrowser() {
         // 获取当前活动标签页
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         const activeTab = tabs[0];
-        
+
         if (!activeTab) {
             throw new Error('无法获取当前标签页');
         }
-        
+
         // 检查是否是特殊页面（chrome://、extension://等）
-        if (activeTab.url.startsWith('chrome://') || 
+        if (activeTab.url.startsWith('chrome://') ||
             activeTab.url.startsWith('chrome-extension://') ||
             activeTab.url.startsWith('edge://') ||
             activeTab.url.startsWith('about:')) {
             throw new Error('无法分析浏览器内部页面，请在普通网页上使用此功能');
         }
-        
+
         try {
             // 尝试注入内容脚本来提取页面内容
             const results = await chrome.scripting.executeScript({
                 target: { tabId: activeTab.id },
                 function: extractContentFromPage
             });
-            
+
             if (results && results[0] && results[0].result) {
                 return results[0].result;
             } else {
                 throw new Error('内容脚本执行失败');
             }
-            
+
         } catch (scriptError) {
             console.log('脚本注入失败，尝试备用方案:', scriptError);
-            
+
             // 备用方案：使用标签页信息
             return {
                 title: activeTab.title || '未知页面',
@@ -995,7 +1037,7 @@ async function extractPageContentInBrowser() {
                 url: activeTab.url
             };
         }
-        
+
     } catch (error) {
         console.error('提取页面内容失败:', error);
         throw error;
@@ -1006,15 +1048,15 @@ async function extractPageContentInBrowser() {
 function extractContentFromPage() {
     try {
         console.log('🧹 开始提取并清洗页面内容...');
-        
+
         // 1. 克隆 Body 防止破坏原页面
         const clonedBody = document.body.cloneNode(true);
-        
+
         // 2. 垃圾元素黑名单 (关键步骤！)
         // 这里的类名涵盖了大部分网站的 导航、侧边栏、弹窗、按钮、页脚
         const junkSelectors = [
             'script', 'style', 'noscript', 'iframe', 'svg',
-            'nav', 'header', 'footer', 
+            'nav', 'header', 'footer',
             '.nav', '.navbar', '.header', '.footer', '.bottom',
             '.sidebar', '.side-bar', '.aside', // 侧边栏
             '.menu', '.breadcrumb', // 菜单和面包屑
@@ -1025,7 +1067,7 @@ function extractContentFromPage() {
             '[role="button"]', '[role="navigation"]',
             '.ai-helper', '.tool-bar' // 针对你截图里的 AI 悬浮球
         ];
-        
+
         // 移除所有垃圾元素
         junkSelectors.forEach(selector => {
             const elements = clonedBody.querySelectorAll(selector);
@@ -1036,7 +1078,7 @@ function extractContentFromPage() {
         // 优先找 <main> 或 .content，如果找不到才用 body
         let mainText = '';
         const contentSelectors = ['main', 'article', '#content', '.course-detail', '.main-content'];
-        
+
         for (const selector of contentSelectors) {
             const el = clonedBody.querySelector(selector);
             if (el) {
@@ -1045,7 +1087,7 @@ function extractContentFromPage() {
                 break;
             }
         }
-        
+
         // 如果没找到特定区域，就用清洗过的 body
         if (!mainText) {
             mainText = clonedBody.innerText;
@@ -1069,52 +1111,52 @@ function extractContentFromPage() {
 // 提取页面图片信息
 function extractPageImages() {
     const images = [];
-    
+
     try {
         // 获取页面中的所有图片
         const imgElements = document.querySelectorAll('img');
-        
+
         for (let i = 0; i < Math.min(imgElements.length, 5); i++) { // 最多处理5张图片
             const img = imgElements[i];
-            
+
             // 过滤掉太小的图片（可能是装饰性图片）
             if (img.width < 50 || img.height < 50) continue;
-            
+
             // 过滤掉明显的装饰性图片
             const src = img.src || '';
             const alt = img.alt || '';
             const className = img.className || '';
-            
-            if (src.includes('logo') || src.includes('icon') || 
+
+            if (src.includes('logo') || src.includes('icon') ||
                 className.includes('logo') || className.includes('icon') ||
                 alt.includes('logo') || alt.includes('icon')) {
                 continue;
             }
-            
+
             // 尝试将图片转换为base64
             try {
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
-                
+
                 // 设置合适的尺寸
                 const maxSize = 400;
                 let { width, height } = img;
-                
+
                 if (width > maxSize || height > maxSize) {
                     const ratio = Math.min(maxSize / width, maxSize / height);
                     width *= ratio;
                     height *= ratio;
                 }
-                
+
                 canvas.width = width;
                 canvas.height = height;
-                
+
                 // 绘制图片到canvas
                 ctx.drawImage(img, 0, 0, width, height);
-                
+
                 // 转换为base64
                 const dataURL = canvas.toDataURL('image/jpeg', 0.7);
-                
+
                 images.push({
                     src: img.src,
                     alt: alt,
@@ -1122,7 +1164,7 @@ function extractPageImages() {
                     width: img.width,
                     height: img.height
                 });
-                
+
             } catch (canvasError) {
                 // 如果canvas转换失败，只记录图片信息
                 images.push({
@@ -1134,11 +1176,11 @@ function extractPageImages() {
                 });
             }
         }
-        
+
     } catch (error) {
         console.error('图片提取失败:', error);
     }
-    
+
     return images;
 }
 
@@ -1147,7 +1189,7 @@ function extractKeywordsFromText(text) {
     if (!text || text.length === 0) {
         return [];
     }
-    
+
     // 教育领域关键词库
     const educationKeywords = [
         '数学', '英语', '语文', '物理', '化学', '生物', '历史', '地理', '政治',
@@ -1158,34 +1200,34 @@ function extractKeywordsFromText(text) {
         'grammar', 'vocabulary', 'reading', 'writing', 'listening', 'speaking',
         'mathematics', 'physics', 'chemistry', 'biology', 'history', 'geography'
     ];
-    
+
     // 简单的关键词提取
     const words = text.toLowerCase()
         .replace(/[^\w\s\u4e00-\u9fff]/g, ' ')  // 保留中英文和数字
         .split(/\s+/)
         .filter(word => word.length > 1);
-    
+
     // 统计词频
     const wordCount = {};
     words.forEach(word => {
         wordCount[word] = (wordCount[word] || 0) + 1;
     });
-    
+
     // 过滤教育相关关键词并计算权重
     const keywords = [];
-    
+
     for (const [word, count] of Object.entries(wordCount)) {
         // 检查是否为教育相关词汇
-        const isEducationWord = educationKeywords.some(eduWord => 
+        const isEducationWord = educationKeywords.some(eduWord =>
             word.includes(eduWord.toLowerCase()) || eduWord.toLowerCase().includes(word)
         );
-        
+
         if (isEducationWord || count >= 3) {  // 教育词汇或高频词
             const weight = count / words.length;  // 计算权重
             keywords.push([word, weight]);
         }
     }
-    
+
     // 按权重排序并返回前20个
     return keywords
         .sort((a, b) => b[1] - a[1])
@@ -1197,14 +1239,14 @@ function generateSummary(text, maxLength = 500) {
     if (!text || text.length <= maxLength) {
         return text;
     }
-    
+
     // 按句子分割
     const sentences = text.split(/[。！？.!?]/).filter(s => s.trim().length > 0);
-    
+
     if (sentences.length <= 3) {
         return text.substring(0, maxLength) + '...';
     }
-    
+
     // 选择前几个句子作为摘要
     let summary = '';
     for (const sentence of sentences) {
@@ -1213,20 +1255,20 @@ function generateSummary(text, maxLength = 500) {
         }
         summary += sentence.trim() + '。';
     }
-    
+
     return summary || text.substring(0, maxLength) + '...';
 }
 
 // 从内容构建知识图谱
 function buildKnowledgeGraphFromContent(pageContent) {
     const { title, content, url } = pageContent;
-    
+
     // 提取关键词
     const keywords = extractKeywordsFromText(content);
-    
+
     // 提取实体（简化版）
     const entities = extractEntitiesFromText(content);
-    
+
     // 构建图谱数据
     const graphData = {
         nodes: [],
@@ -1238,7 +1280,7 @@ function buildKnowledgeGraphFromContent(pageContent) {
             total_entities: entities.length
         }
     };
-    
+
     // 添加页面节点
     graphData.nodes.push({
         id: 'page',
@@ -1247,7 +1289,7 @@ function buildKnowledgeGraphFromContent(pageContent) {
         size: 30,
         color: '#3b82f6'
     });
-    
+
     // 添加关键词节点
     keywords.slice(0, 10).forEach((keyword, i) => {
         const [word, weight] = keyword;
@@ -1259,7 +1301,7 @@ function buildKnowledgeGraphFromContent(pageContent) {
             color: '#10b981',
             weight: weight
         });
-        
+
         // 添加页面到关键词的边
         graphData.edges.push({
             source: 'page',
@@ -1268,7 +1310,7 @@ function buildKnowledgeGraphFromContent(pageContent) {
             weight: weight
         });
     });
-    
+
     // 添加实体节点
     entities.slice(0, 8).forEach((entity, i) => {
         graphData.nodes.push({
@@ -1279,7 +1321,7 @@ function buildKnowledgeGraphFromContent(pageContent) {
             color: '#8b5cf6',
             context: entity.context
         });
-        
+
         // 添加页面到实体的边
         graphData.edges.push({
             source: 'page',
@@ -1288,14 +1330,14 @@ function buildKnowledgeGraphFromContent(pageContent) {
             label: entity.type
         });
     });
-    
+
     return graphData;
 }
 
 // 从文本中提取实体
 function extractEntitiesFromText(text) {
     const entities = [];
-    
+
     // 简单的实体识别规则
     const patterns = {
         '概念': /([^\s，。！？；：]{2,10})(概念|定义|含义|是指)/g,
@@ -1304,7 +1346,7 @@ function extractEntitiesFromText(text) {
         '方法': /([^\s，。！？；：]{2,10})(方法|技巧|策略|步骤)/g,
         '知识点': /([^\s，。！？；：]{2,10})(知识点|要点|重点)/g
     };
-    
+
     for (const [entityType, pattern] of Object.entries(patterns)) {
         let match;
         while ((match = pattern.exec(text)) !== null) {
@@ -1318,7 +1360,7 @@ function extractEntitiesFromText(text) {
             }
         }
     }
-    
+
     return entities;
 }
 
@@ -1333,7 +1375,7 @@ chrome.runtime.onStartup.addListener(() => {
 // 创建备用知识图谱（当主要方法失败时使用）
 function createFallbackKnowledgeGraph() {
     console.log('创建备用知识图谱...');
-    
+
     return {
         nodes: [
             { id: 'page', label: '当前页面', type: 'page', size: 30, color: '#3b82f6' },
@@ -1366,12 +1408,12 @@ function createFallbackKnowledgeGraph() {
 // ==========================================
 async function generatePageSummary(pageData) {
     // 你的 DeepSeek API Key
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b"; 
+    const API_KEY = "YOUR_API_KEY_HERE";
     const API_URL = "https://api.deepseek.com/chat/completions";
-    
+
     try {
         console.log('🤖 [Summary] 开始生成结构化课程分析...');
-        
+
         // 简单的数据清洗
         let content = pageData.content || "";
         if (content.length > 8000) content = content.substring(0, 8000) + '...';
@@ -1398,7 +1440,7 @@ ${content}
    ### 4. ⚠️ 学习攻略
    (难点预警)
 `;
-        
+
         const response = await fetch(API_URL, {
             method: 'POST',
             headers: {
@@ -1414,16 +1456,16 @@ ${content}
                 temperature: 0.4
             })
         });
-        
+
         if (!response.ok) {
             throw new Error(`API Error: ${response.status}`);
         }
 
         const data = await response.json();
         if (!data.choices || !data.choices[0]) throw new Error('API 响应格式错误');
-        
+
         return data.choices[0].message.content;
-        
+
     } catch (error) {
         console.error('Summary 生成失败:', error);
         return `### ⚠️ 分析失败\n\n原因：${error.message}`;
@@ -1436,7 +1478,7 @@ ${content}
 // ==========================================
 async function analyzeContentWithDeepSeek(rawContent) {
     // 🔴 记得替换你的 API Key
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b"; 
+    const API_KEY = "YOUR_API_KEY_HERE";
     const API_URL = "https://api.deepseek.com/chat/completions";
 
     const prompt = `
@@ -1449,10 +1491,10 @@ ${rawContent.substring(0, 3000)}
 {
     "content": "这里写一段通俗易懂的课程简介（约100字），不要包含导航栏里的废话。",
     "keywords": [
-        ["核心概念1", 0.9], 
-        ["核心概念2", 0.8], 
-        ["核心概念3", 0.7], 
-        ["核心概念4", 0.6], 
+        ["核心概念1", 0.9],
+        ["核心概念2", 0.8],
+        ["核心概念3", 0.7],
+        ["核心概念4", 0.6],
         ["核心概念5", 0.5]
     ]
 }
@@ -1475,11 +1517,11 @@ ${rawContent.substring(0, 3000)}
 
         const data = await response.json();
         const content = data.choices[0].message.content;
-        
+
         // 清洗可能存在的 Markdown 标记
         const jsonStr = content.replace(/```json/g, '').replace(/```/g, '').trim();
         const result = JSON.parse(jsonStr);
-        
+
         result.source = 'ai_deep_analysis';
         return result;
 
