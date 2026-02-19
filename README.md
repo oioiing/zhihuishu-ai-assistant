@@ -86,7 +86,7 @@
 1. 打开 `background_fixed.js` 文件
 2. 找到以下代码：
    ```javascript
-   const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b";
+   const API_KEY = "YOUR_API_KEY_HERE";
    ```
 3. 替换为您的真实API密钥：
    ```javascript
