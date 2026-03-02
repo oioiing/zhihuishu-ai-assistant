@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能作业阅卷助手</title>
+    <style>
+        :root {
+            --bg: #e8e8e8;
+            --surface: #efefef;
+            --text-primary: #232323;
+            --text-secondary: #626262;
+            --border-soft: rgba(0, 0, 0, 0.12);
+            --shadow-soft: 0 8px 18px rgba(0, 0, 0, 0.08);
+            --cta-bg: #2a2a2a;
+            --cta-bg-hover: #1f1f1f;
+            --tab-bg: #e1e1e1;
+            --tab-active: #f5f5f5;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 368px;
+            min-height: 480px;
+            font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: var(--text-primary);
+            padding: 20px 18px 18px;
+            letter-spacing: 0.1px;
+            position: relative;
+            overflow: hidden;
+        }
+
+
+        body::before,
+        body::after {
+            display: none;
+        }
+
+        body::before {
+            width: 180px;
+            height: 120px;
+            top: -28px;
+            left: -36px;
+            background: #efd96e;
+            transform: rotate(-7deg);
+        }
+
+        body::after {
+            width: 210px;
+            height: 86px;
+            right: -44px;
+            top: 116px;
+            background: #e6bfd6;
+            transform: rotate(8deg);
+        }
+
+
+        body > * {
+            position: relative;
+            z-index: 1;
+        }
+
+        .version {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            background: var(--surface);
+            color: var(--text-primary);
+            padding: 4px 11px;
+            border-radius: 999px;
+            border: 1px solid var(--border-soft);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+        }
+
+
+        .header {
+            text-align: center;
+            margin-bottom: 14px;
+            width: 100%;
+            background: var(--surface);
+            border-radius: 18px;
+            border: 1px solid var(--border-soft);
+            padding: 16px 14px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.08);
+        }
+
+
+        .logo {
+            font-size: 28px;
+            margin-bottom: 8px;
+            filter: saturate(0.9);
+        }
+
+        .title {
+            font-size: 21px;
+            font-weight: 750;
+            letter-spacing: 0.2px;
+            color: var(--text-primary);
+        }
+
+
+        .subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+            font-weight: 500;
+        }
+
+        .feature-list {
+            width: 100%;
+            display: block;
+            min-height: 268px;
+            margin-bottom: 14px;
+        }
+
+        .tab-panel {
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            width: 100%;
+            animation: fadeInPanel 0.18s ease;
+        }
+
+        .tab-panel.active {
+            display: flex;
+        }
+
+        @keyframes fadeInPanel {
+            from {
+                opacity: 0;
+                transform: translateY(4px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .feature-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 15px;
+            background: var(--surface);
+            border: 1px solid var(--border-soft);
+            border-radius: 14px;
+            cursor: pointer;
+            transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+            user-select: none;
+            text-align: left;
+            box-shadow: var(--shadow-soft);
+        }
+
+
+        .feature-row:hover {
+            transform: translateY(-1px);
+            border-color: rgba(0, 0, 0, 0.18);
+            box-shadow: 0 12px 22px rgba(0, 0, 0, 0.11);
+        }
+
+        .feature-row:active {
+            transform: translateY(0px) scale(0.998);
+        }
+
+        .feature-row.cta {
+            background: var(--cta-bg);
+            border-color: var(--cta-bg);
+            color: #ffffff;
+            box-shadow: 0 12px 22px rgba(0, 0, 0, 0.2);
+        }
+
+        .feature-row.cta:hover {
+            background: var(--cta-bg-hover);
+            border-color: var(--cta-bg-hover);
+        }
+
+
+        .feature-row.cta .title,
+        .feature-row.cta .desc {
+            color: #ffffff;
+        }
+
+        .feature-row .icon { 
+            font-size: 22px; 
+            min-width: 28px; 
+            text-align: center; 
+            filter: saturate(0.9);
+        }
+
+        .feature-row .body { 
+            flex: 1; 
+        }
+
+        .feature-row .title { 
+            font-size: 15px; 
+            font-weight: 650; 
+            color: var(--text-primary); 
+            line-height: 1.2;
+        }
+
+
+        .feature-row .desc { 
+            font-size: 12px; 
+            color: var(--text-secondary); 
+            margin-top: 4px; 
+            font-weight: 500;
+            line-height: 1.3;
+        }
+
+        .feature-list .feature-row:nth-child(2),
+        .feature-list .feature-row:nth-child(3),
+        .feature-list .feature-row:nth-child(4) {
+            background: var(--surface);
+        }
+
+        .status {
+            width: 100%;
+            font-size: 12px;
+            font-weight: 600;
+            background: var(--surface);
+            color: #2d3340;
+            padding: 11px 12px;
+            border-radius: 14px;
+            border: 1px solid var(--border-soft);
+            box-shadow: 0 8px 16px rgba(37, 42, 51, 0.10);
+            text-align: center;
+        }
+
+
+        .hint {
+            margin-top: 10px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-align: center;
+            line-height: 1.4;
+            font-weight: 500;
+        }
+
+
+        .student-input {
+            width: 100%;
+            padding: 7px 11px;
+            border: 1px solid var(--border-soft);
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            margin-top: 4px;
+            background: var(--surface);
+            color: #2d2f36;
+        }
+
+
+        .student-input:focus {
+            border-color: var(--cta-bg);
+            box-shadow: 0 0 0 3px rgba(35, 40, 51, 0.14);
+        }
+
+        .student-input::placeholder {
+            color: #9499a3;
+        }
+
+        .single-student-row {
+            cursor: default !important;
+        }
+
+        .single-student-row:hover {
+            transform: none !important;
+        }
+
+        .settings-row {
+            cursor: default !important;
+            background: #efefef;
+        }
+
+
+        .settings-row:hover {
+            transform: none !important;
+            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.08);
+            border-color: rgba(0, 0, 0, 0.1);
+        }
+
+
+        .settings-row label {
+            width: 100%;
+        }
+
+        .settings-row input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: #2a2a2a;
+        }
+
+        .settings-title-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            width: 100%;
+        }
+
+        .api-key-field {
+            width: 100%;
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .api-key-input {
+            flex: 1;
+            min-width: 0;
+            padding: 8px 10px;
+            border-radius: 10px;
+            border: 1px solid var(--border-soft);
+            background: #ffffff;
+            color: var(--text-primary);
+            font-size: 12px;
+            font-weight: 500;
+            outline: none;
+        }
+
+        .api-key-input:focus {
+            border-color: var(--cta-bg);
+            box-shadow: 0 0 0 3px rgba(35, 40, 51, 0.14);
+        }
+
+        .api-key-save {
+            border: 1px solid var(--cta-bg);
+            background: var(--cta-bg);
+            color: #ffffff;
+            border-radius: 10px;
+            padding: 8px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.15s ease;
+            white-space: nowrap;
+        }
+
+        .api-key-save:hover {
+            background: var(--cta-bg-hover);
+            border-color: var(--cta-bg-hover);
+        }
+
+        .api-key-save:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .api-key-masked {
+            margin-top: 6px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            word-break: break-all;
+        }
+
+        .runtime-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+
+        .runtime-select {
+            flex: 1;
+            min-width: 110px;
+            padding: 8px 10px;
+            border-radius: 10px;
+            border: 1px solid var(--border-soft);
+            font-size: 12px;
+            background: #ffffff;
+            color: var(--text-primary);
+            outline: none;
+        }
+
+        .runtime-btn {
+            border: 1px solid #cfcfcf;
+            background: #f5f5f5;
+            color: #2a2a2a;
+            border-radius: 10px;
+            padding: 8px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .runtime-metrics {
+            margin-top: 6px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.4;
+        }
+
+        /* 自动补全下拉框 */
+        .autocomplete-container {
+            position: relative;
+            width: 100%;
+        }
+
+        .autocomplete-dropdown {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            max-height: 160px;
+            overflow-y: auto;
+            background: white;
+            border: 1px solid rgba(0, 0, 0, 0.12);
+            border-top: none;
+            border-radius: 0 0 12px 12px;
+            box-shadow: 0 12px 22px rgba(0, 0, 0, 0.14);
+            z-index: 1000;
+            display: none;
+        }
+
+
+        .autocomplete-dropdown.show {
+            display: block;
+        }
+
+        .autocomplete-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background-color 0.15s;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+        }
+
+        .autocomplete-item:last-child {
+            border-bottom: none;
+        }
+
+        .autocomplete-item:hover,
+        .autocomplete-item.active {
+            background-color: #f4f5f8;
+            color: #1f1f22;
+        }
+
+        .autocomplete-item.active {
+            font-weight: 600;
+        }
+
+        .autocomplete-empty {
+            padding: 12px;
+            text-align: center;
+            color: #9aa8bc;
+            font-size: 11px;
+        }
+
+        .autocomplete-loading {
+            padding: 12px;
+            text-align: center;
+            color: #8090a6;
+            font-size: 11px;
+        }
+
+
+        .tab-shell {
+            width: 100%;
+            margin-top: 12px;
+            position: relative;
+        }
+
+        .tab-bar {
+            width: 100%;
+            height: 62px;
+            border-radius: 31px;
+            background: var(--tab-bg);
+            border: 1px solid rgba(0, 0, 0, 0.12);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 10px;
+            box-shadow: 0 12px 22px rgba(0, 0, 0, 0.12);
+            position: relative;
+            overflow: hidden;
+        }
+
+
+        .tab-indicator {
+            position: absolute;
+            left: 0;
+            top: 8px;
+            width: 44px;
+            height: 46px;
+            border-radius: 23px;
+            background: linear-gradient(180deg, #f8f8f8 0%, #ededed 100%);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.12);
+            transition: transform 420ms cubic-bezier(0.22, 1.2, 0.24, 1), width 280ms ease;
+            z-index: 1;
+        }
+
+
+        .tab-item {
+            width: 44px;
+            height: 46px;
+            border-radius: 23px;
+            border: none;
+            background: transparent;
+            color: #8a8a8a;
+            font-size: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 1;
+            cursor: pointer;
+            transition: transform 180ms cubic-bezier(0.2, 0.9, 0.2, 1.2), color 180ms ease;
+            position: relative;
+            z-index: 2;
+        }
+
+        .tab-icon {
+            width: 18px;
+            height: 18px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .tab-item:active {
+            transform: scale(0.9);
+        }
+
+        .tab-item.active {
+            color: #202020;
+            animation: tabElastic 440ms cubic-bezier(0.2, 1.25, 0.2, 1);
+        }
+
+
+        @keyframes tabElastic {
+            0% { transform: scale(0.78) translateY(3px); }
+            40% { transform: scale(1.14) translateY(-2px); }
+            70% { transform: scale(0.96) translateY(1px); }
+            100% { transform: scale(1) translateY(0); }
+        }
+
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">🎯</div>
+        <div class="title">智能作业阅卷</div>
+        <div class="subtitle">快乐高效批改 · 一键开始</div>
+    </div>
+
+    <div class="feature-list">
+        <div class="tab-panel active" data-panel="home">
+            <div class="feature-row cta" data-action="auto-grade">
+                <span class="icon">🚀</span>
+                <div class="body">
+                    <div class="title">开始自动批改</div>
+                    <div class="desc">清晰主按钮，一键批改全班</div>
+                </div>
+            </div>
+
+            <div class="feature-row" data-action="analyze">
+                <span class="icon">🔍</span>
+                <div class="body">
+                    <div class="title">AI 作业分析</div>
+                    <div class="desc">智能分析作业题目，提取评分标准</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-panel" data-panel="tools">
+            <div class="feature-row" data-action="manual-criteria">
+                <span class="icon">✏️</span>
+                <div class="body">
+                    <div class="title">手动设置标准</div>
+                    <div class="desc">手动输入和编辑评分标准</div>
+                </div>
+            </div>
+
+            <div class="feature-row" data-action="remind">
+                <span class="icon">📢</span>
+                <div class="body">
+                    <div class="title">一键催交</div>
+                    <div class="desc">批量催交未提交作业的学生</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-panel" data-panel="single">
+            <div class="feature-row single-student-row" data-action="single-student">
+                <span class="icon">👤</span>
+                <div class="body">
+                    <div class="title">批改单个学生</div>
+                    <div class="desc autocomplete-container">
+                        <input type="text" id="student-name-input" placeholder="输入学生姓名..." 
+                               class="student-input" onclick="event.stopPropagation()" 
+                               autocomplete="off">
+                        <div id="autocomplete-dropdown" class="autocomplete-dropdown"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-panel" data-panel="settings">
+            <div class="feature-row settings-row">
+                <span class="icon">⚙️</span>
+                <div class="body">
+                    <div class="title">
+                        <label style="display: flex; align-items: center; cursor: pointer; margin: 0;">
+                            <input type="checkbox" id="include-reviewed-checkbox" 
+                                   style="margin-right: 8px; cursor: pointer;">
+                            <span>包括已批阅作业</span>
+                        </label>
+                    </div>
+                    <div class="desc">重新批改已经批阅过的作业</div>
+                </div>
+            </div>
+
+            <div class="feature-row settings-row">
+                <span class="icon">📐</span>
+                <div class="body">
+                    <div class="title">
+                        <label style="display: flex; align-items: center; cursor: pointer; margin: 0;">
+                            <input type="checkbox" id="show-rule-breakdown-checkbox" checked
+                                   style="margin-right: 8px; cursor: pointer;">
+                            <span>显示规则评分明细</span>
+                        </label>
+                    </div>
+                    <div class="desc">在评语末尾展示扣分与分项得分</div>
+                </div>
+            </div>
+
+            <div class="feature-row settings-row">
+                <span class="icon">🔐</span>
+                <div class="body">
+                    <div class="title">
+                        <div class="settings-title-row">
+                            <span>API Key</span>
+                        </div>
+                    </div>
+                    <div class="desc">用于 DeepSeek 与 OCR 服务鉴权（本地存储）</div>
+                    <div class="api-key-field">
+                        <input
+                            type="password"
+                            id="api-key-input"
+                            class="api-key-input"
+                            placeholder="请输入 API Key"
+                            autocomplete="off"
+                            spellcheck="false"
+                        >
+                        <button type="button" id="save-api-key-btn" class="api-key-save">保存</button>
+                    </div>
+                    <div class="api-key-masked" id="api-key-masked">当前：未设置</div>
+                </div>
+            </div>
+
+            <div class="feature-row settings-row">
+                <span class="icon">📊</span>
+                <div class="body">
+                    <div class="title">
+                        <div class="settings-title-row">
+                            <span>运行诊断</span>
+                        </div>
+                    </div>
+                    <div class="desc">日志分级与异常指标摘要</div>
+                    <div class="runtime-row">
+                        <select id="log-level-select" class="runtime-select" aria-label="日志级别">
+                            <option value="debug">debug</option>
+                            <option value="info">info</option>
+                            <option value="warn">warn</option>
+                            <option value="error">error</option>
+                            <option value="silent">silent</option>
+                        </select>
+                        <button type="button" id="refresh-metrics-btn" class="runtime-btn">刷新</button>
+                        <button type="button" id="clear-metrics-btn" class="runtime-btn">清空指标</button>
+                    </div>
+                    <div id="runtime-metrics-summary" class="runtime-metrics">指标：加载中...</div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <div class="tab-shell">
+        <div class="tab-bar">
+            <div class="tab-indicator" aria-hidden="true"></div>
+            <button class="tab-item active" type="button" data-tab="home" title="主页" aria-label="主页">
+                <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M3 10.5L12 3l9 7.5"></path>
+                    <path d="M5.5 9.5V20h13V9.5"></path>
+                </svg>
+            </button>
+            <button class="tab-item" type="button" data-tab="tools" title="工具" aria-label="工具">
+                <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M14 4h6v6h-6z"></path>
+                    <path d="M4 14h6v6H4z"></path>
+                    <path d="M4 4h6v6H4z"></path>
+                    <path d="M14 14h6v6h-6z"></path>
+                </svg>
+            </button>
+            <button class="tab-item" type="button" data-tab="single" title="单人" aria-label="单人">
+                <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="8" r="3.5"></circle>
+                    <path d="M5 20c1.3-3.2 4-5 7-5s5.7 1.8 7 5"></path>
+                </svg>
+            </button>
+            <button class="tab-item" type="button" data-tab="settings" title="设置" aria-label="设置">
+                <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 8.7a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6z"></path>
+                    <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1.1 1.1 0 1 1-1.6 1.6l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V19a1.1 1.1 0 1 1-2.2 0v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a1.1 1.1 0 1 1-1.6-1.6l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H9a1.1 1.1 0 1 1 0-2.2h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a1.1 1.1 0 1 1 1.6-1.6l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V5a1.1 1.1 0 1 1 2.2 0v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a1.1 1.1 0 1 1 1.6 1.6l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a1.1 1.1 0 1 1 0 2.2h-.2a1 1 0 0 0-.9.6z"></path>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
