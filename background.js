@@ -66,6 +66,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ success: false, error: error.message });
                 });
             return true;
+
+        case 'domGrading':
+            console.log('📝 处理 DOM 阅卷请求...');
+            analyzeTextContent(request.homeworkData)
+                .then(response => {
+                    sendResponse({ success: true, data: response });
+                })
+                .catch(error => {
+                    console.error('❌ DOM 阅卷失败:', error);
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true;
             
         case 'analyzeHomework':
             analyzeHomeworkWithAI(request.imageData, request.selectionInfo)
@@ -191,6 +203,12 @@ async function captureScreenSimple() {
             throw new Error(`截图功能暂时不可用: ${error.message}`);
         }
     }
+}
+
+// 处理作业分析（截图版）
+async function analyzeHomeworkWithAI(imageData, selectionInfo) {
+    console.log('📸 处理截图作业分析...');
+    return analyzeImageWithAI(imageData);
 }
 
 // 图像分析函数（增强版本 - 集成OCR和AI分析）

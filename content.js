@@ -296,6 +296,7 @@
         const functions = [
             { id: 'screenshot', icon: '📸', text: '截图批改', color: '#FF6B6B' },
             { id: 'autoDetect', icon: '🎯', text: '智能识别作业', color: '#FF9800' },
+            { id: 'domGrading', icon: '📝', text: '自动阅卷', color: '#F44336' },
             { id: 'chat', icon: '💬', text: 'AI对话', color: '#66BB6A' },
             { id: 'analyze', icon: '📊', text: '页面分析', color: '#4FC3F7' },
             { id: 'knowledge', icon: '🔍', text: '知识图谱', color: '#AB47BC' },
@@ -528,6 +529,12 @@
                 animateRingStart(color);
                 showFloatingPanel('智能识别作业', color, '🎯 正在智能识别页面作业区域...');
                 handleAutoDetectHomework();
+                break;
+
+            case 'domGrading':
+                animateRingStart(color);
+                showFloatingPanel('自动阅卷 (DOM)', color, '📝 正在提取页面题目内容...');
+                handleDomGrading();
                 break;
                 
             case 'chat':
@@ -1059,6 +1066,136 @@
         createFloatingBall();
     }
 
+    function handleDomGrading() {
+        console.log('📝 开始 DOM 自动阅卷...');
+        try {
+            const homeworkData = extractHomeworkText();
+
+            if (!homeworkData || homeworkData.length < 10) {
+                updatePanelBody(`
+                    <div style="text-align:center; padding:30px; color:#666;">
+                        <div style="font-size:48px; margin-bottom:16px;">🔍</div>
+                        <h3 style="margin:0 0 12px 0; color:#333;">未检测到题目内容</h3>
+                        <p style="font-size:14px; line-height:1.6; margin-bottom:20px;">
+                            当前页面没有识别到明显的题目内容。<br>
+                            请确保页面已完全加载，或尝试切换到作业/练习页面。
+                        </p>
+                    </div>
+                `);
+                animateRingStop();
+                return;
+            }
+
+            updatePanelBody('<div style="text-align:center; padding:20px;">🤖 AI 正在阅卷中，请稍候...</div>');
+
+            chrome.runtime.sendMessage({
+                action: 'domGrading',
+                homeworkData: homeworkData
+            }, (response) => {
+                if (response && response.success) {
+                    displayDomGradingResults(response.data);
+                } else {
+                    updatePanelBody(`<div style="color:red; padding:20px;">❌ 阅卷失败: ${response ? response.error : '未知错误'}</div>`);
+                }
+                animateRingStop();
+            });
+
+        } catch (error) {
+            console.error('❌ DOM 阅卷失败:', error);
+            updatePanelBody(`<div style="color:red; padding:20px;">❌ 发生错误: ${error.message}</div>`);
+            animateRingStop();
+        }
+    }
+
+    function extractHomeworkText() {
+        console.log('🔍 正在提取题目 DOM 内容...');
+        let questions = [];
+
+        // 1. 尝试寻找已知的题目容器
+        const questionSelectors = [
+            '.question-item', '.question-box', '.subject_item',
+            '.exam-question', '.test-question', '.exercise-item',
+            '.tm-content', '.subject_describe', '.question-content',
+            '.topic-item', '.question-container'
+        ];
+
+        questionSelectors.forEach(selector => {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach(el => {
+                if (isValidHomeworkArea(el)) {
+                    const text = el.innerText.trim();
+                    if (text && !questions.includes(text)) {
+                        questions.push(text);
+                    }
+                }
+            });
+        });
+
+        // 2. 如果没找到具体题目，尝试通过智能识别区域获取
+        if (questions.length === 0) {
+            const areas = detectHomeworkAreas();
+            if (areas.length > 0) {
+                // 取置信度最高的前两个区域
+                areas.slice(0, 2).forEach(area => {
+                    questions.push(area.element.innerText.trim());
+                });
+            }
+        }
+
+        // 3. 清洗和合并
+        const combinedText = questions
+            .filter(q => q.length > 10)
+            .join('\n\n---\n\n');
+
+        console.log(`✅ 提取完成，共 ${questions.length} 块内容，总长度: ${combinedText.length}`);
+        return combinedText.substring(0, 10000);
+    }
+
+    function displayDomGradingResults(data) {
+        const html = `
+            <div style="max-height:500px; overflow-y:auto; padding:10px;">
+                <div style="background:#fff; border-radius:8px; border:1px solid #e5e7eb; box-shadow:0 2px 10px rgba(0,0,0,0.05);">
+                    <div style="background:#F44336; color:white; padding:12px; border-radius:8px 8px 0 0; font-weight:600; display:flex; align-items:center; gap:8px;">
+                        <span>📝</span> AI 自动阅卷结果
+                    </div>
+                    <div id="zh-grading-content" style="padding:16px; white-space:pre-wrap; line-height:1.6; font-size:14px; color:#333;">${data}</div>
+                </div>
+
+                <div style="margin-top:16px; text-align:center; display:flex; gap:8px; justify-content:center;">
+                    <button id="zh-copy-grading-btn" style="background:#4CAF50; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:12px;">
+                        📋 复制结果
+                    </button>
+                    <button id="zh-retry-grading-btn" style="background:#2196F3; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:12px;">
+                        🔄 重新阅卷
+                    </button>
+                </div>
+            </div>
+        `;
+        updatePanelBody(html);
+
+        // 使用 addEventListener 代替 onclick 以符合 CSP
+        const copyBtn = document.getElementById('zh-copy-grading-btn');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', () => {
+                const content = document.getElementById('zh-grading-content').innerText;
+                navigator.clipboard.writeText(content).then(() => {
+                    const oldText = copyBtn.innerText;
+                    copyBtn.innerText = '✅ 已复制';
+                    setTimeout(() => copyBtn.innerText = oldText, 2000);
+                }).catch(err => {
+                    console.error('复制失败:', err);
+                });
+            });
+        }
+
+        const retryBtn = document.getElementById('zh-retry-grading-btn');
+        if (retryBtn) {
+            retryBtn.addEventListener('click', () => {
+                handleDomGrading();
+            });
+        }
+    }
+
 })();
     // ==========================================
     // 8. Readability 页面内容提取
@@ -1389,6 +1526,8 @@
         }
     }
     
+    // --- 自动阅卷 (DOM) ---
+
     // 辅助函数：停止状态环动画
     function stopStatusRing() {
         try {
