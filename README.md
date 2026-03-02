@@ -2,6 +2,20 @@
 
 这是一个用于知慧树教学平台的 Chrome 扩展，提供单题智能批改、班级自动批改、作业详情 AI 分析与重新批阅等功能，帮助教师高效完成批改工作。
 
+## 快速安装（3 分钟）
+
+1. 下载或克隆本仓库到本地。
+2. 打开 Chrome，进入 `chrome://extensions/`。
+3. 开启右上角“开发者模式”。
+4. 点击“加载已解压的扩展程序”，选择本项目根目录。
+5. 安装完成后，按 [USER_GUIDE.md](docs/USER_GUIDE.md) 开始使用。
+
+## 项目截图
+
+- 截图目录： [assets/screenshots](assets/screenshots)
+- 截图说明： [assets/screenshots/README.md](assets/screenshots/README.md)
+- 建议放置 3 张图：弹窗首页、自动批改流程、作业分析结果
+
 ## 推荐阅读顺序（1 分钟上手）
 
 1. 先看 [README_教师使用简版.md](docs/README_教师使用简版.md)：快速了解能做什么。
