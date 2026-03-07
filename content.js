@@ -294,6 +294,7 @@
 
     function createFunctionList(){
         const functions = [
+            { id: 'domGrading', icon: '📝', text: 'DOM 阅卷', color: '#6366f1' },
             { id: 'screenshot', icon: '📸', text: '截图批改', color: '#FF6B6B' },
             { id: 'autoDetect', icon: '🎯', text: '智能识别作业', color: '#FF9800' },
             { id: 'chat', icon: '💬', text: 'AI对话', color: '#66BB6A' },
@@ -507,7 +508,129 @@
     }
 
     // ==========================================
-    // 5. 功能路由
+    // 5. DOM 提取与自动填充助手
+    // ==========================================
+
+    function normalizeAnswerText(answerText) {
+        if (!answerText) return '';
+        let cleanedText = answerText
+            .replace(/[，,]/g, '')
+            .replace(/[、]/g, '')
+            .replace(/题/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        return cleanedText;
+    }
+
+    function isValidAnswerText(answerText) {
+        if (!answerText) return false;
+        return answerText.length > 0;
+    }
+
+    function extractStandardAnswer() {
+        const answerPatterns = [
+            /标准答案[：:]\s*([^\n]+)/i,
+            /正确答案[：:]\s*([^\n]+)/i,
+            /参考答案[：:]\s*([^\n]+)/i,
+            /答案[：:]\s*([A-Da-d0-9\s\-:：.、]+)/i
+        ];
+
+        const allText = document.body.textContent;
+        for (let pattern of answerPatterns) {
+            const match = allText.match(pattern);
+            if (match && match[1]) {
+                const answer = normalizeAnswerText(match[1].trim());
+                if (isValidAnswerText(answer)) {
+                    console.log('✅ 提取到标准答案:', answer);
+                    return answer;
+                }
+            }
+        }
+
+        // 尝试查找特定容器
+        const selectors = ['.answer-box', '.reference-answer', '.standard-answer'];
+        for (let s of selectors) {
+            const el = document.querySelector(s);
+            if (el) return normalizeAnswerText(el.innerText);
+        }
+
+        return '';
+    }
+
+    function extractStudentAnswer() {
+        const primaryAreas = [
+            document.querySelector('.answer-box'),
+            document.querySelector('.markdown-latex-container'),
+            document.querySelector('.evaluation-content'),
+            document.querySelector('.break-all.break-words'),
+            document.querySelector('[class*="homework-content"]'),
+            document.querySelector('[class*="student-answer"]')
+        ];
+
+        for (let area of primaryAreas) {
+            if (area) {
+                const text = area.innerText.trim();
+                if (text.length > 0) return text;
+            }
+        }
+
+        return '';
+    }
+
+    function findScoreInput() {
+        let inputs = document.querySelectorAll('input[placeholder*="成绩"], input[placeholder*="分数"], input.el-input__inner[type="text"]');
+        for (let input of inputs) {
+            const placeholder = input.getAttribute('placeholder') || '';
+            if (placeholder.includes('成绩') || placeholder.includes('分') || placeholder.includes('输入')) {
+                return input;
+            }
+        }
+        return inputs[0] || null;
+    }
+
+    function findCommentInput() {
+        let textareas = document.querySelectorAll('textarea.el-textarea__inner, textarea');
+        for (let textarea of textareas) {
+            const placeholder = textarea.getAttribute('placeholder') || '';
+            if (placeholder.includes('评语') || placeholder.includes('备注') || placeholder.includes('老师')) {
+                return textarea;
+            }
+        }
+        return textareas[0] || document.querySelector('[contenteditable="true"]');
+    }
+
+    function autoFillGradeAndComment(score, comment) {
+        const scoreInput = findScoreInput();
+        if (scoreInput) {
+            scoreInput.value = String(score);
+            scoreInput.dispatchEvent(new Event('input', { bubbles: true }));
+            scoreInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        const commentInput = findCommentInput();
+        if (commentInput && comment) {
+            commentInput.value = comment;
+            if (commentInput.tagName === 'DIV') commentInput.textContent = comment;
+            commentInput.dispatchEvent(new Event('input', { bubbles: true }));
+            commentInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        showNotification('✅ 已自动填充评分与评语', '#4CAF50');
+    }
+
+    function showNotification(message, color) {
+        const notification = document.createElement('div');
+        notification.style.cssText = `
+            position: fixed; top: 20px; right: 20px; background: ${color}; color: white;
+            padding: 12px 16px; border-radius: 10px; box-shadow: 0 6px 16px rgba(0,0,0,0.2);
+            z-index: 2147483647; font-size: 14px; font-weight: 600;
+        `;
+        notification.textContent = message;
+        document.body.appendChild(notification);
+        setTimeout(() => notification.remove(), 3000);
+    }
+
+    // ==========================================
+    // 6. 功能路由
     // ==========================================
     function handleFunctionClick(id, color){
         console.log('点击功能:', id);
@@ -553,11 +676,110 @@
                 showFloatingPanel('智能页面摘要', color, '📄 正在提取页面内容...');
                 handlePageSummarize();
                 break;
+
+            case 'domGrading':
+                animateRingStart(color);
+                showFloatingPanel('DOM 自动阅卷', color, '📝 正在读取页面作业内容...');
+                handleDOMGrading(color);
+                break;
         }
     }
     // ==========================================
     // 6. 功能实现
     // ==========================================
+
+    async function handleDOMGrading(color) {
+        console.log('📝 开始 DOM 阅卷...');
+        try {
+            const standardAnswer = extractStandardAnswer();
+            const studentAnswer = extractStudentAnswer();
+
+            if (!studentAnswer) {
+                updatePanelBody('<div style="color:red; padding:20px;">❌ 未能提取到学生作答内容。请确保已进入作业批阅页面。</div>');
+                animateRingStop();
+                return;
+            }
+
+            console.log('✅ DOM 提取成功:', {
+                standardLen: standardAnswer.length,
+                studentLen: studentAnswer.length
+            });
+
+            updatePanelBody('<div style="text-align:center; padding:20px;">🤖 AI 正在基于页面内容进行深度阅卷...</div>');
+
+            chrome.runtime.sendMessage({
+                action: 'analyzeHomeworkDOM',
+                data: {
+                    standardAnswer,
+                    studentAnswer,
+                    url: window.location.href,
+                    title: document.title
+                }
+            }, (response) => {
+                if (response && response.success) {
+                    displayDOMGradingResult(response.data, color);
+                } else {
+                    updatePanelBody(`<div style="color:red; padding:20px;">❌ 阅卷失败: ${response ? response.error : '未知错误'}</div>`);
+                }
+                animateRingStop();
+            });
+
+        } catch (error) {
+            console.error('❌ DOM 阅卷流程失败:', error);
+            updatePanelBody(`<div style="color:red; padding:20px;">❌ 运行出错: ${error.message}</div>`);
+            animateRingStop();
+        }
+    }
+
+    function displayDOMGradingResult(analysisData, color) {
+        const html = `
+            <div style="max-height:500px; overflow-y:auto; padding:10px;">
+                <div style="background:#fff; border-radius:8px; border:1px solid #e5e7eb;">
+                    <div style="background:${color}; color:white; padding:12px; border-radius:8px 8px 0 0; font-weight:600;">
+                        🤖 AI 智能阅卷结果
+                    </div>
+                    <div id="zh-grading-result-text" style="padding:16px; white-space:pre-wrap; line-height:1.6; font-size:14px; color:#374151;"></div>
+                </div>
+
+                <div style="margin-top:16px; text-align:center; display:flex; gap:10px; justify-content:center;">
+                    <button id="zh-auto-fill-btn" style="background:#4f46e5; color:white; border:none; padding:10px 20px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px; transition:all 0.2s;">
+                        ✨ 自动填充评分
+                    </button>
+                    <button onclick="location.reload()" style="background:#f3f4f6; color:#374151; border:1px solid #d1d5db; padding:10px 20px; border-radius:8px; cursor:pointer; font-size:13px;">
+                        🔄 重新读取
+                    </button>
+                </div>
+            </div>
+        `;
+
+        updatePanelBody(html);
+
+        // 安全地设置 AI 结果内容
+        const resultTextEl = document.getElementById('zh-grading-result-text');
+        if (resultTextEl) resultTextEl.textContent = analysisData;
+
+        // 绑定自动填充事件
+        const fillBtn = document.getElementById('zh-auto-fill-btn');
+        if (fillBtn) {
+            fillBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                // 尝试从文本中解析分数
+                const scoreMatch = analysisData.match(/(?:总分|得分|评分)[：:]*\s*(\d+)/);
+                const score = scoreMatch ? scoreMatch[1] : '';
+
+                // 提取评语（去除标题和评分部分）
+                let comment = analysisData;
+                if (scoreMatch) {
+                    comment = analysisData.split(scoreMatch[0])[1] || analysisData;
+                }
+
+                autoFillGradeAndComment(score, comment.trim());
+            });
+
+            fillBtn.onmouseover = () => fillBtn.style.transform = 'scale(1.02)';
+            fillBtn.onmouseout = () => fillBtn.style.transform = 'scale(1)';
+        }
+    }
     
     // --- 聊天功能 ---
     function renderChatUI(){
