@@ -1,4 +1,5 @@
-// 智能作业阅卷助手 - 前端脚本
+﻿// 智能作业阅卷助手 - 前端脚本
+// 注意：content-utils.js 应该在本文件之前加载
 
 console.debug('=== Content Script 加载开始 ===');
 
@@ -25,211 +26,606 @@ window.addEventListener('unhandledrejection', (e) => {
         console.debug('📍 [Content] 当前页面:', window.location.href);
         console.debug('📍 [Content] DOM状态:', document.readyState);
 
-    // ==========================================
-    // 全局状态管理
-    // ==========================================
-    const AUTO_GRADING_STATE = {
-        isRunning: false,                   // 是否正在自动批改
-        isPaused: false,                    // 是否暂停中
-        currentStudentIndex: 0,             // 当前批改的学生索引
-        totalStudents: 0,                   // 总学生数
-        studentList: [],                    // 学生列表
-        questionData: null,                 // 题目数据
-        standardAnswer: '',                 // 缓存标准答案
-        currentScore: null,                 // 当前评分
-        currentFeedback: null,              // 当前评语
-        autoNavigate: true,                 // 是否自动跳转到下一个学生
-        includeReviewedSubmissions: false,  // 是否包括已批阅的作业（用于重新批阅）
-        showRuleScoringBreakdown: true,     // 是否显示规则评分明细
+    // ========== 配置常量 ==========
+    const OCR_TIMEOUT_MS = 15000;          // OCR 识别超时（毫秒）
+    const OCR_MAX_RETRIES = 2;             // OCR 失败后最大重试次数
+    const PREVIEW_CACHE_MAX_ITEMS = 30;    // Preview 共享缓存最大保留条数
+    const CONFIRM_POLL_INTERVAL_MS = 200;  // 确认弹窗轮询间隔（毫秒）
+    const CONFIRM_MAX_ATTEMPTS = 25;       // 确认弹窗最大轮询次数（25 × 200ms = 5秒）
+
+    // ========== 工具函数 ==========
+    function decodeBase64Param(param) {
+        const decoded = decodeURIComponent(param);
+        const padded = decoded + '='.repeat((4 - decoded.length % 4) % 4);
+        return atob(padded);
+    }
+
+    // ========== window.open拦截 - 捕获文件预览URL（避免打开新标签页）==========
+    (() => {
+        const originalOpen = window.open;
+        window._zhsInterceptedPreviewUrls = window._zhsInterceptedPreviewUrls || [];
         
-        // 从作业分析获取的自动批改条件
-        autoGradingConditions: {
-            gradingCriteria: [],            // 评分标准列表
-            gradingCriteriaItems: [],       // 结构化评分标准（含分值）
-            gradingAdvice: '',              // 批改建议文本
-            gradingAdviceRich: '',          // 富文本批改建议
-            commonMistakes: [],             // 常见错误列表
-            homeworkType: '',               // 作业类型
-            typeExplanation: '',            // 作业类型说明
-            schemaVersion: 2,               // 配置结构版本
-            isSet: false                    // 是否已设置条件
-        },
-
-        // 当前作业类型（供评语生成逻辑使用）
-        currentHomeworkType: '',
-        lastAIGradingResult: null,
-        
-        // 学生姓名缓存（用于自动补全）
-        studentNameCache: [],               // 缓存所有学生姓名
-        studentNameCacheLoaded: false,      // 是否已加载学生姓名缓存
-        criteriaNameDisplayMode: 'wrap'     // 评分项名称显示模式：wrap | single-line
-    };
-
-    const SETTINGS_KEYS = {
-        showRuleScoringBreakdown: 'zhai_show_rule_breakdown',
-        criteriaNameDisplayMode: 'zhai_criteria_name_display_mode',
-        manualCriteriaConditions: 'zhai_manual_criteria_conditions',
-        logLevel: 'zhai_log_level'
-    };
-
-    const MANUAL_CRITERIA_SCHEMA_VERSION = 2;
-    const LOG_LEVELS = {
-        debug: 10,
-        info: 20,
-        warn: 30,
-        error: 40,
-        silent: 99
-    };
-    let CURRENT_LOG_LEVEL = 'info';
-
-    function setLogLevel(level) {
-        const normalized = String(level || '').toLowerCase();
-        CURRENT_LOG_LEVEL = Object.prototype.hasOwnProperty.call(LOG_LEVELS, normalized) ? normalized : 'info';
-    }
-
-    function shouldLog(level) {
-        const current = LOG_LEVELS[CURRENT_LOG_LEVEL] ?? LOG_LEVELS.info;
-        const target = LOG_LEVELS[level] ?? LOG_LEVELS.info;
-        return target >= current;
-    }
-
-    const appLogger = {
-        debug: (...args) => {
-            if (shouldLog('debug')) console.debug(...args);
-        },
-        info: (...args) => {
-            if (shouldLog('info')) console.info(...args);
-        },
-        warn: (...args) => {
-            if (shouldLog('warn')) console.warn(...args);
-        },
-        error: (...args) => {
-            if (shouldLog('error')) console.error(...args);
-        }
-    };
-
-    function parseLegacyCriterionText(text = '') {
-        const raw = String(text || '').trim();
-        if (!raw) {
-            return { name: '', score: 0 };
-        }
-
-        const scoreMatch = raw.match(/（\s*(\d{1,3})\s*分\s*）$/);
-        const score = scoreMatch ? Math.min(100, Math.max(0, parseInt(scoreMatch[1], 10))) : 0;
-        const name = scoreMatch ? raw.replace(/（\s*\d{1,3}\s*分\s*）$/, '').trim() : raw;
-        return { name, score };
-    }
-
-    function normalizeCriteriaItems(criteriaItems, gradingCriteria) {
-        if (Array.isArray(criteriaItems) && criteriaItems.length > 0) {
-            return criteriaItems
-                .map(item => ({
-                    name: String(item?.name || '').trim(),
-                    score: Math.min(100, Math.max(0, Math.round(Number(item?.score) || 0)))
-                }))
-                .filter(item => item.name.length > 0);
-        }
-
-        if (Array.isArray(gradingCriteria) && gradingCriteria.length > 0) {
-            return gradingCriteria
-                .map(parseLegacyCriterionText)
-                .filter(item => item.name.length > 0);
-        }
-
-        return [];
-    }
-
-    function migrateAutoGradingConditions(rawConditions) {
-        const source = rawConditions && typeof rawConditions === 'object' ? rawConditions : {};
-        const migratedItems = normalizeCriteriaItems(source.gradingCriteriaItems, source.gradingCriteria);
-        const gradingCriteria = migratedItems.map(item => `${item.name}（${item.score}分）`);
-
-        return {
-            gradingCriteria,
-            gradingCriteriaItems: migratedItems,
-            gradingAdvice: String(source.gradingAdvice || '').trim(),
-            gradingAdviceRich: String(source.gradingAdviceRich || '').trim(),
-            commonMistakes: Array.isArray(source.commonMistakes) ? source.commonMistakes.filter(Boolean) : [],
-            homeworkType: String(source.homeworkType || '').trim(),
-            typeExplanation: String(source.typeExplanation || '').trim(),
-            schemaVersion: MANUAL_CRITERIA_SCHEMA_VERSION,
-            isSet: migratedItems.length > 0 && !!String(source.homeworkType || '').trim()
+        window.open = function(url, ...args) {
+            console.info(`🔗 [window.open拦截] 捕获到URL: ${url}`);
+            
+            // 记录所有preview相关URL
+            if (url && typeof url === 'string' && 
+                (url.includes('resource/preview') || 
+                 url.includes('resource/onlinePreview') ||
+                 url.includes('resource/getCorsFile'))) {
+                
+                window._zhsInterceptedPreviewUrls.push({
+                    previewUrl: url,
+                    timestamp: Date.now()
+                });
+                
+                console.info(`📎 [window.open拦截] 记录预览URL（共${window._zhsInterceptedPreviewUrls.length}个）`);
+                console.info(`   Preview URL: ${url.substring(0, 120)}`);
+                
+                // 尝试解码Base64参数获取真实文件URL
+                try {
+                    const urlObj = new URL(url);
+                    const uParam = urlObj.searchParams.get('u') || urlObj.searchParams.get('urlPath');
+                    if (uParam) {
+                        const realUrl = decodeBase64Param(uParam);
+                        console.info(`🔓 [window.open拦截] 解码出真实URL: ${realUrl}`);
+                        
+                        // 记录解码后的URL
+                        window._zhsInterceptedPreviewUrls[window._zhsInterceptedPreviewUrls.length - 1].decodedUrl = realUrl;
+                    }
+                } catch (e) {
+                    console.warn(`⚠️ [window.open拦截] URL解码失败: ${e.message}`);
+                }
+                
+                // 🚫 阻止打开新标签页：返回一个mock window对象，避免用户看到新标签页弹出
+                console.info(`🚫 [window.open拦截] 已阻止打开新标签页（已提取URL）`);
+                return {
+                    closed: false,
+                    close: () => {},
+                    focus: () => {},
+                    blur: () => {},
+                    postMessage: () => {}
+                };
+            }
+            
+            // 非preview URL，正常打开
+            return originalOpen.apply(this, [url, ...args]);
         };
-    }
+        
+        console.info('✅ [window.open拦截] 已启动，将捕获所有window.open调用（preview类URL不会打开新标签）');
+    })();
 
-    function persistManualCriteriaConditions() {
-        try {
-            const payload = {
-                version: MANUAL_CRITERIA_SCHEMA_VERSION,
-                data: migrateAutoGradingConditions(AUTO_GRADING_STATE.autoGradingConditions)
-            };
-            localStorage.setItem(SETTINGS_KEYS.manualCriteriaConditions, JSON.stringify(payload));
-        } catch (error) {
-            appLogger.warn('⚠️ [设置] 保存评分标准配置失败:', error.message);
-        }
-    }
-
-    function loadPersistedSettings() {
-        try {
-            const persistedShowRuleBreakdown = localStorage.getItem(SETTINGS_KEYS.showRuleScoringBreakdown);
-            if (persistedShowRuleBreakdown !== null) {
-                AUTO_GRADING_STATE.showRuleScoringBreakdown = persistedShowRuleBreakdown === '1';
+    // ========== 阻止附件链接打开新标签页 ==========
+    (() => {
+        document.addEventListener('click', (e) => {
+            // 查找点击的<a>标签
+            let target = e.target;
+            while (target && target.tagName !== 'A' && target !== document.body) {
+                target = target.parentElement;
             }
-
-            const persistedDisplayMode = localStorage.getItem(SETTINGS_KEYS.criteriaNameDisplayMode);
-            if (persistedDisplayMode === 'wrap' || persistedDisplayMode === 'single-line') {
-                AUTO_GRADING_STATE.criteriaNameDisplayMode = persistedDisplayMode;
-            }
-
-            const persistedLogLevel = localStorage.getItem(SETTINGS_KEYS.logLevel);
-            if (persistedLogLevel) {
-                setLogLevel(persistedLogLevel);
-            }
-
-            const persistedManualRaw = localStorage.getItem(SETTINGS_KEYS.manualCriteriaConditions);
-            if (persistedManualRaw) {
-                const parsed = JSON.parse(persistedManualRaw);
-                const sourceData = parsed?.data || parsed;
-                const migrated = migrateAutoGradingConditions(sourceData);
-                AUTO_GRADING_STATE.autoGradingConditions = migrated;
-
-                const persistedVersion = Number(parsed?.version || sourceData?.schemaVersion || 0);
-                if (persistedVersion !== MANUAL_CRITERIA_SCHEMA_VERSION) {
-                    persistManualCriteriaConditions();
-                    appLogger.info('🔄 [设置] 已完成评分标准旧版数据迁移');
+            
+            if (target && target.tagName === 'A') {
+                const href = target.getAttribute('href') || '';
+                const targetAttr = target.getAttribute('target') || '';
+                
+                // 如果是预览链接且设置了target="_blank"，阻止打开新标签页
+                if (targetAttr === '_blank' && 
+                    (href.includes('resource/preview') || 
+                     href.includes('resource/onlinePreview') ||
+                     href.includes('polymas.com'))) {
+                    console.info(`🚫 [链接拦截] 阻止打开新标签页: ${href.substring(0, 80)}...`);
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // 改为在当前页面打开（如果需要的话可以注释掉这行，完全阻止跳转）
+                    // window.location.href = href;
                 }
             }
-        } catch (error) {
-            appLogger.warn('⚠️ [设置] 读取本地设置失败:', error.message);
-        }
-    }
+        }, true);  // 使用捕获阶段，优先拦截
+        
+        console.info('✅ [链接拦截] 已启动，将阻止预览链接打开新标签页');
+    })();
 
-    function persistRuleBreakdownSetting(value) {
-        try {
-            localStorage.setItem(SETTINGS_KEYS.showRuleScoringBreakdown, value ? '1' : '0');
-        } catch (error) {
-            appLogger.warn('⚠️ [设置] 保存规则明细开关失败:', error.message);
-        }
-    }
+    // ========== Preview页面检测 - 提取文件URL ==========
+    (() => {
+        const currentUrl = window.location.href;
+        
+        // 检测是否为preview页面
+        if (currentUrl.includes('/resource/preview')) {
+            appLogger.info('🎯 [Preview页面] 检测到预览页面，准备提取文件URL...');
+            
+            try {
+                const urlObj = new URL(currentUrl);
+                const uParam = urlObj.searchParams.get('u');
+                const nParam = urlObj.searchParams.get('n');
+                
+                if (uParam) {
+                    // 解码文件URL
+                    const fileUrl = decodeBase64Param(uParam);
+                    
+                    appLogger.info('✅ [Preview页面] 成功提取文件URL:', fileUrl);
+                    
+                    // 解码文件名（可选）
+                    let fileName = 'unknown.docx';
+                    if (nParam) {
+                        try {
+                            fileName = decodeBase64Param(nParam);
+                            appLogger.info('✅ [Preview页面] 文件名:', fileName);
+                        } catch (e) {
+                            appLogger.warn('⚠️ [Preview页面] 文件名解码失败:', e.message);
+                        }
+                    }
+                    
+                    // ========== 分析DOCX内容函数 ==========
+                    const analyzeDocxContent = (rawContent) => {
+                        appLogger.info('🔍 [Preview页面] 开始分析DOCX内容...');
+                        
+                        // 清理和规范化文本
+                        const cleanText = (text) => {
+                            return text
+                                .replace(/\r\n/g, '\n')
+                                .replace(/[\u200B-\u200D\uFEFF]/g, '')  // 移除零宽字符
+                                .trim();
+                        };
+                        
+                        const content = cleanText(rawContent);
 
-    function persistCriteriaNameDisplayMode(mode) {
-        try {
-            const finalMode = mode === 'single-line' ? 'single-line' : 'wrap';
-            localStorage.setItem(SETTINGS_KEYS.criteriaNameDisplayMode, finalMode);
-            AUTO_GRADING_STATE.criteriaNameDisplayMode = finalMode;
-        } catch (error) {
-            appLogger.warn('⚠️ [设置] 保存评分项名称显示模式失败:', error.message);
-        }
-    }
+                        // 对“扁平化”文本做一次结构恢复：题号、选项、答案标签前主动断行
+                        const normalizeForParsing = (text) => {
+                            return text
+                                .replace(/\u00A0/g, ' ')
+                                .replace(/\s+(答案|参考答案|标准答案|Answer|Answers)\b/gi, '\n$1')
+                                .replace(/\s+([\d]{1,2}[\.\)）])/g, '\n$1')
+                                .replace(/\s+([一二三四五六七八九十]+[\.\)）])/g, '\n$1')
+                                .replace(/([?？])\s*([A-Da-d][\.\)）:：])/g, '$1\n$2')
+                                .replace(/\s+([A-Da-d][\.\)）:：])/g, '\n$1')
+                                .replace(/\n{3,}/g, '\n\n')
+                                .trim();
+                        };
 
-    function persistLogLevel(level) {
-        try {
-            setLogLevel(level);
-            localStorage.setItem(SETTINGS_KEYS.logLevel, CURRENT_LOG_LEVEL);
-        } catch (error) {
-            appLogger.warn('⚠️ [设置] 保存日志级别失败:', error.message);
+                        const normalizedContent = normalizeForParsing(content);
+                        const lines = normalizedContent.split('\n').filter(line => line.trim());
+                        
+                        // 识别题目和答案
+                        const analysis = {
+                            fileName: fileName,
+                            fileUrl: fileUrl,
+                            rawContent: content,
+                            contentLength: content.length,
+                            lineCount: lines.length,
+                            questions: [],
+                            answers: [],
+                            answerExplanations: [],
+                            keyPoints: [],
+                            structure: {
+                                hasTitle: false,
+                                hasQuestions: false,
+                                hasAnswers: false
+                            }
+                        };
+                        
+                        // 识别标题（通常是第一行或很短的行）
+                        if (lines.length > 0) {
+                            const firstLine = lines[0];
+                            if (firstLine.length < 100 && (firstLine.includes('题') || firstLine.includes('考') || firstLine.includes('练') || firstLine.includes('作业'))) {
+                                analysis.structure.hasTitle = true;
+                                analysis.title = firstLine;
+                            }
+                        }
+                        
+                        // 识别题目和答案区块
+                        let currentQuestion = '';
+                        let currentAnswer = '';
+                        let inAnswerSection = false;
+                        let answerSectionStart = -1;
+                        
+                        // 第一步：找到答案区块的开始位置
+                        for (let i = 0; i < lines.length; i++) {
+                            const line = lines[i].trim();
+                            if (line.match(/^(答案|参考答案|标准答案|Answer|ANSWER)$/i)) {
+                                answerSectionStart = i;
+                                break;
+                            }
+                        }
+                        
+                        // 包裹多行内容的逻辑
+                        const wrapContent = (text) => {
+                            if (!text) return '';
+                            // 移除多余的空格但保留结构
+                            return text.trim().replace(/\s+/g, ' ');
+                        };
+                        
+                        for (let i = 0; i < lines.length; i++) {
+                            const line = lines[i].trim();
+                            if (!line) continue;
+                            
+                            if (i === answerSectionStart) {
+                                inAnswerSection = true;
+                                analysis.structure.hasAnswers = true;
+                                if (currentQuestion) {
+                                    analysis.questions.push(wrapContent(currentQuestion));
+                                    currentQuestion = '';
+                                }
+                                continue;
+                            }
+                            
+                            if (inAnswerSection) {
+                                // 在答案区块中
+                                if (/^[\d一二三四五六七八九十百千万亿]+[\.\)）、：:]/.test(line)) {
+                                    // 新的答案项目
+                                    if (currentAnswer) {
+                                        const answerObj = separateAnswerAndExplanation(currentAnswer);
+                                        analysis.answers.push(answerObj.answer);
+                                        if (answerObj.explanation) {
+                                            analysis.answerExplanations.push(answerObj.explanation);
+                                        }
+                                    }
+                                    currentAnswer = line;
+                                } else if (currentAnswer || line.length > 5) {
+                                    // 继续当前答案（多行）
+                                    if (currentAnswer) {
+                                        currentAnswer += ' ' + line;
+                                    }
+                                }
+                            } else {
+                                // 在题目区块中
+                                if (/^[\d一二三四五六七八九十百千万亿]+[\.\)）、：:]/.test(line)) {
+                                    // 新的题目项目
+                                    if (currentQuestion) {
+                                        analysis.questions.push(wrapContent(currentQuestion));
+                                    }
+                                    analysis.structure.hasQuestions = true;
+                                    currentQuestion = line;
+                                } else if (currentQuestion) {
+                                    // 继续当前题目（包括选项）
+                                    if (line.match(/^[A-Da-d][\.\)）：]/)) {
+                                        // 这是一个选项
+                                        currentQuestion += ' ' + line;
+                                    } else {
+                                        // 题目的继续或其他内容
+                                        currentQuestion += ' ' + line;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 保存最后的内容
+                        if (currentQuestion) {
+                            analysis.questions.push(wrapContent(currentQuestion));
+                        }
+                        if (currentAnswer) {
+                            const answerObj = separateAnswerAndExplanation(currentAnswer);
+                            analysis.answers.push(answerObj.answer);
+                            if (answerObj.explanation) {
+                                analysis.answerExplanations.push(answerObj.explanation);
+                            }
+                        }
+
+                        // 辅助函数：分离答案和解析
+                        function separateAnswerAndExplanation(answerText) {
+                            const text = answerText.trim();
+
+                            // 寻找解析关键词
+                            const explanationKeywords = ['解释', '解析', '因为', '所以', 'because', 'Explanation', '理由', 'reason'];
+
+                            for (const keyword of explanationKeywords) {
+                                const idx = text.indexOf(keyword);
+                                if (idx > 10) {
+                                    return {
+                                        answer: text.substring(0, idx).trim(),
+                                        explanation: text.substring(idx).trim()
+                                    };
+                                }
+                            }
+
+                            // 如果没有找到关键词，检查是否有很长的文本（可能包含解析）
+                            if (text.length > 200) {
+                                const thirdPoint = Math.floor(text.length / 3);
+                                return {
+                                    answer: text.substring(0, thirdPoint).trim(),
+                                    explanation: text.substring(thirdPoint).trim()
+                                };
+                            }
+
+                            return { answer: text, explanation: null };
+                        }
+                        
+                        // 兜底：如果仍然只识别到 0/1 题，尝试按“题号块”从整段文本二次切分
+                        if (analysis.questions.length <= 1) {
+                            const questionBlockRegex = /(?:^|\n)\s*([\d一二三四五六七八九十]+[\.\)）][\s\S]*?)(?=\n\s*[\d一二三四五六七八九十]+[\.\)）]|\n\s*(?:答案|参考答案|标准答案|Answer|Answers)\b|$)/g;
+                            const fallbackMatches = [...normalizedContent.matchAll(questionBlockRegex)]
+                                .map((m) => (m[1] || '').trim())
+                                .filter(Boolean);
+
+                            if (fallbackMatches.length > analysis.questions.length) {
+                                analysis.questions = fallbackMatches.map((q) => wrapContent(q));
+                                analysis.structure.hasQuestions = analysis.questions.length > 0;
+                                appLogger.info(`📌 [Preview页面] 启用题号块兜底切分，题目数: ${analysis.questions.length}`);
+                            }
+                        }
+
+                        // 提取关键点（较长的段落）
+                        analysis.keyPoints = lines
+                            .filter(line => line.length > 30 && line.length < 200)
+                            .slice(0, 10);
+                        
+                        appLogger.info('✅ [Preview页面] 内容分析完成:', {
+                            contentLength: analysis.contentLength,
+                            hasTitle: analysis.structure.hasTitle,
+                            hasQuestions: analysis.structure.hasQuestions,
+                            questionCount: analysis.questions.length,
+                            hasAnswers: analysis.structure.hasAnswers,
+                            answerCount: analysis.answers.length,
+                            explanationCount: analysis.answerExplanations.length
+                        });
+                        
+                        return analysis;
+                    };
+                    
+                    // 将文件URL发送给background进行下载和解析
+                    appLogger.info('📤 [Preview页面] 发送文件URL给background...');
+                    chrome.runtime.sendMessage({
+                        action: 'downloadAndParseAttachment',
+                        fileUrl: fileUrl,
+                        fileName: fileName
+                    }, async (response) => {
+                        if (chrome.runtime.lastError) {
+                            appLogger.error('❌ [Preview页面] 发送失败:', chrome.runtime.lastError.message);
+                        } else if (response && response.success) {
+                            appLogger.info('✅ [Preview页面] 文件处理成功:', {
+                                fileName: response.fileName,
+                                contentLength: response.content?.length || 0
+                            });
+                            
+                            // 分析内容：优先使用 onlinePreview 的 PDF 文本，其次才用 DOCX 解析结果
+                            const docxContent = response.content || '';
+                            const docxAnalysis = analyzeDocxContent(docxContent);
+
+                            const calculateAnalysisQuality = (analysisObj, text) => {
+                                const safeText = String(text || '');
+                                const questionCount = Number(analysisObj?.questions?.length || 0);
+                                const answerCount = Number(analysisObj?.answers?.length || 0);
+                                const optionCount = (safeText.match(/(?:^|\s)[A-Da-d][\.\)）:：]/g) || []).length;
+                                const numberedBlocks = (safeText.match(/(?:^|\n)\s*[\d一二三四五六七八九十]+[\.\)）]/gm) || []).length;
+                                const contentLengthScore = Math.min(safeText.length, 12000) / 20;
+
+                                return questionCount * 120 +
+                                    answerCount * 90 +
+                                    optionCount * 8 +
+                                    numberedBlocks * 20 +
+                                    contentLengthScore;
+                            };
+
+                            let finalContent = docxContent;
+                            let analysis = {
+                                ...docxAnalysis,
+                                source: 'docx-xml'
+                            };
+                            let bestScore = calculateAnalysisQuality(analysis, finalContent);
+
+                            try {
+                                // 给PDF渲染和textLayer生成一点时间
+                                await new Promise((resolve) => setTimeout(resolve, 1800));
+
+                                const iframeTextResult = await new Promise((resolve) => {
+                                    chrome.runtime.sendMessage({ action: 'extractIframeText' }, (res) => {
+                                        if (chrome.runtime.lastError) {
+                                            resolve({ success: false, error: chrome.runtime.lastError.message });
+                                            return;
+                                        }
+                                        resolve(res || { success: false, error: 'empty response' });
+                                    });
+                                });
+
+                                if (iframeTextResult?.success && iframeTextResult.text && iframeTextResult.text.length > 200) {
+                                    const iframeText = String(iframeTextResult.text || '').trim();
+                                    const iframeAnalysis = analyzeDocxContent(iframeText);
+                                    const iframeScore = calculateAnalysisQuality(iframeAnalysis, iframeText);
+
+                                    const shouldUseIframe = !finalContent ||
+                                        iframeScore > bestScore * 1.05 ||
+                                        (iframeAnalysis.questions?.length || 0) > (analysis.questions?.length || 0);
+
+                                    if (shouldUseIframe) {
+                                        finalContent = iframeText;
+                                        analysis = {
+                                            ...iframeAnalysis,
+                                            source: 'iframe-pdf-text',
+                                            fallbackFromDocx: (docxAnalysis.questions?.length || 0) <= 1
+                                        };
+                                        bestScore = iframeScore;
+
+                                        appLogger.info('✅ [Preview页面] 使用 iframe PDF 文本作为主分析源:', {
+                                            length: iframeText.length,
+                                            questionCount: analysis.questions?.length || 0,
+                                            answerCount: analysis.answers?.length || 0,
+                                            score: Math.round(iframeScore),
+                                            url: iframeTextResult.url
+                                        });
+                                    } else {
+                                        appLogger.info('ℹ️ [Preview页面] iframe 文本质量未超过 DOCX，保留 DOCX 解析结果', {
+                                            iframeScore: Math.round(iframeScore),
+                                            docxScore: Math.round(bestScore),
+                                            iframeLength: iframeText.length,
+                                            docxLength: finalContent.length
+                                        });
+                                    }
+                                } else {
+                                    appLogger.info('ℹ️ [Preview页面] 未提取到有效iframe文本，尝试 Canvas OCR 二级兜底...');
+
+                                    const extractCurrentPageCanvasImages = () => {
+                                        try {
+                                            const canvases = Array.from(document.querySelectorAll('canvas'));
+                                            if (!canvases.length) return [];
+
+                                            // 过滤掉过小的画布，优先保留 PDF 主渲染页。
+                                            const usableCanvases = canvases
+                                                .filter((canvas) => {
+                                                    const width = Number(canvas.width || 0);
+                                                    const height = Number(canvas.height || 0);
+                                                    return width >= 300 && height >= 300;
+                                                })
+                                                .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+
+                                            const images = [];
+                                            for (const canvas of usableCanvases) {
+                                                try {
+                                                    const dataUrl = canvas.toDataURL('image/png');
+                                                    if (dataUrl && dataUrl.startsWith('data:image/')) {
+                                                        images.push(dataUrl);
+                                                    }
+                                                } catch (e) {
+                                                    // 跨域污染画布会抛错，继续尝试其他画布。
+                                                }
+
+                                                if (images.length >= 5) {
+                                                    break;
+                                                }
+                                            }
+
+                                            return images;
+                                        } catch (e) {
+                                            return [];
+                                        }
+                                    };
+
+                                    const canvasResult = await new Promise((resolve) => {
+                                        chrome.runtime.sendMessage({ action: 'extractIframeCanvasImages' }, (res) => {
+                                            if (chrome.runtime.lastError) {
+                                                resolve({ success: false, error: chrome.runtime.lastError.message });
+                                                return;
+                                            }
+                                            resolve(res || { success: false, error: 'empty response' });
+                                        });
+                                    });
+
+                                    let canvasImages = [];
+                                    if (canvasResult?.success && Array.isArray(canvasResult.images) && canvasResult.images.length > 0) {
+                                        canvasImages = canvasResult.images;
+                                        appLogger.info(`🖼️ [Preview页面] 从iframe提取到 ${canvasImages.length} 张canvas，开始OCR...`);
+                                    } else {
+                                        const localCanvasImages = extractCurrentPageCanvasImages();
+                                        if (localCanvasImages.length > 0) {
+                                            canvasImages = localCanvasImages;
+                                            appLogger.info(`🖼️ [Preview页面] iframe未命中，改用当前页面canvas提取 ${canvasImages.length} 张图像`);
+                                        }
+                                    }
+
+                                    if (canvasImages.length > 0) {
+                                        appLogger.info(`🖼️ [Preview页面] 开始OCR，共 ${canvasImages.length} 张图像...`);
+
+                                        const ocrResult = await new Promise((resolve) => {
+                                            chrome.runtime.sendMessage({
+                                                action: 'ocrImageDataUrls',
+                                                images: canvasImages,
+                                                fileName
+                                            }, (res) => {
+                                                if (chrome.runtime.lastError) {
+                                                    resolve({ success: false, error: chrome.runtime.lastError.message });
+                                                    return;
+                                                }
+                                                resolve(res || { success: false, error: 'empty response' });
+                                            });
+                                        });
+
+                                        if (ocrResult?.success && ocrResult.text && ocrResult.text.length > 100) {
+                                            const ocrText = String(ocrResult.text || '').trim();
+                                            const ocrAnalysis = analyzeDocxContent(ocrText);
+                                            const ocrScore = calculateAnalysisQuality(ocrAnalysis, ocrText);
+
+                                            if (ocrScore >= bestScore * 0.98) {
+                                                finalContent = ocrText;
+                                                analysis = {
+                                                    ...ocrAnalysis,
+                                                    source: 'iframe-canvas-ocr',
+                                                    fallbackFromDocx: true,
+                                                    pageCount: ocrResult.pageCount || canvasImages.length
+                                                };
+                                                bestScore = ocrScore;
+                                                appLogger.info('✅ [Preview页面] 已切换到 Canvas OCR 分析结果:', {
+                                                    length: ocrText.length,
+                                                    questionCount: analysis.questions?.length || 0,
+                                                    answerCount: analysis.answers?.length || 0,
+                                                    pageCount: analysis.pageCount,
+                                                    score: Math.round(ocrScore)
+                                                });
+                                            } else {
+                                                appLogger.info('ℹ️ [Preview页面] Canvas OCR 结果未优于当前最佳来源，保留原结果', {
+                                                    ocrScore: Math.round(ocrScore),
+                                                    bestScore: Math.round(bestScore)
+                                                });
+                                            }
+                                        } else {
+                                            appLogger.info('ℹ️ [Preview页面] Canvas OCR 未提取到有效文字，回退DOCX解析结果');
+                                        }
+                                    } else {
+                                        appLogger.info('ℹ️ [Preview页面] 未提取到canvas图像，回退DOCX解析结果');
+                                    }
+                                }
+                            } catch (e) {
+                                appLogger.warn('⚠️ [Preview页面] iframe文本提取失败，回退DOCX:', e.message);
+                            }
+                            
+                            // 将结果存储到window，供opener页面访问
+                            window._zhsPreviewFileResult = {
+                                fileUrl: fileUrl,
+                                fileName: fileName,
+                                content: finalContent,
+                                analysis: analysis,
+                                success: true
+                            };
+
+                            // 同步写入扩展共享缓存，避免 opener 消息丢失
+                            persistPreviewResultToSharedStore(window._zhsPreviewFileResult, 'preview-page');
+                            
+                            // 尝试通知opener页面 - 发送分析结果
+                            if (window.opener && !window.opener.closed) {
+                                try {
+                                    window.opener.postMessage({
+                                        type: 'ZHS_PREVIEW_FILE_READY',
+                                        data: {
+                                            fileUrl: fileUrl,
+                                            fileName: fileName,
+                                            content: finalContent,
+                                            analysis: analysis
+                                        }
+                                    }, '*');
+                                    appLogger.info('✅ [Preview页面] 已通知opener页面（包含分析结果）');
+                                    
+                                    // 设置完成标记，防止Preview页面过早关闭
+                                    window._zhsPreviewProcessing = true;
+                                    
+                                    // 500ms后清除标记，给opener充足时间处理
+                                    setTimeout(() => {
+                                        window._zhsPreviewProcessing = false;
+                                        appLogger.info('✅ [Preview页面] 标记已清除，可关闭');
+                                    }, 500);
+                                    appLogger.info('📊 [Preview页面] 分析摘要:', {
+                                        title: analysis.title,
+                                        questions: analysis.questions.slice(0, 2).map(q => q.substring(0, 50) + '...'),
+                                        answers: analysis.answers.slice(0, 2).map(a => a.substring(0, 50) + '...')
+                                    });
+                                } catch (e) {
+                                    appLogger.warn('⚠️ [Preview页面] 无法通知opener:', e.message);
+                                }
+                            }
+                        } else {
+                            appLogger.error('❌ [Preview页面] 文件处理失败:', response);
+                        }
+                    });
+                } else {
+                    appLogger.warn('⚠️ [Preview页面] URL中未找到u参数');
+                }
+            } catch (e) {
+                appLogger.error('❌ [Preview页面] URL解析失败:', e);
+            }
         }
-    }
+    })();
+
+    // ==========================================
+    // content-utils.js 已加载全局状态和工具，
+    // 下面开始定义具体的功能函数
+    // ==========================================
 
     function syncLogLevelFromExtensionStorage() {
         try {
@@ -255,6 +651,202 @@ window.addEventListener('unhandledrejection', (e) => {
     loadPersistedSettings();
     syncLogLevelFromExtensionStorage();
 
+    // ========== 监听来自Preview页面的文件信息 ==========
+    const ZHS_SHARED_PREVIEW_RESULTS_KEY = 'zhs_shared_preview_results_v1';
+    window._zhsPreviewFileResults = window._zhsPreviewFileResults || [];
+
+    const PREVIEW_NAME_SPACE_REGEX = /[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/g;
+
+    function normalizePreviewName(name) {
+        return String(name || '')
+            .normalize('NFKC')
+            .replace(PREVIEW_NAME_SPACE_REGEX, '')
+            .replace(/["'`“”‘’]/g, '')
+            .toLowerCase();
+    }
+
+    function normalizePreviewNameLoose(name) {
+        return normalizePreviewName(name).replace(/[^a-z0-9\u4e00-\u9fa5]/g, '');
+    }
+
+    function isLikelySamePreviewName(leftName, rightName) {
+        const left = normalizePreviewName(leftName);
+        const right = normalizePreviewName(rightName);
+        if (!left || !right) return false;
+        if (left === right || left.includes(right) || right.includes(left)) return true;
+
+        const looseLeft = normalizePreviewNameLoose(left);
+        const looseRight = normalizePreviewNameLoose(right);
+        if (!looseLeft || !looseRight) return false;
+
+        return looseLeft === looseRight || looseLeft.includes(looseRight) || looseRight.includes(looseLeft);
+    }
+
+    function mergePreviewResultIntoMemory(fileInfo, source = 'unknown') {
+        if (!fileInfo?.fileUrl) return false;
+
+        const exists = window._zhsPreviewFileResults.some((item) => {
+            return String(item?.fileUrl || '') === String(fileInfo.fileUrl || '');
+        });
+
+        if (exists) {
+            return false;
+        }
+
+        window._zhsPreviewFileResults.push({
+            fileName: fileInfo.fileName,
+            fileUrl: fileInfo.fileUrl,
+            content: fileInfo.content,
+            analysis: fileInfo.analysis || null,
+            timestamp: Number(fileInfo.timestamp || Date.now())
+        });
+
+        appLogger.info(`📎 [主页面] 缓存新增(${source})：${fileInfo.fileName}（共${window._zhsPreviewFileResults.length}个）`);
+        return true;
+    }
+
+    let _storageWriteQueue = Promise.resolve();
+
+    function persistPreviewResultToSharedStore(fileInfo, source = 'unknown') {
+        _storageWriteQueue = _storageWriteQueue.then(() => new Promise((resolve) => {
+            try {
+                if (!chrome?.storage?.local || !fileInfo?.fileUrl) { resolve(); return; }
+
+                chrome.storage.local.get([ZHS_SHARED_PREVIEW_RESULTS_KEY], (data) => {
+                    if (chrome.runtime.lastError) {
+                        appLogger.warn('⚠️ [Preview共享缓存] 读取失败:', chrome.runtime.lastError.message);
+                        resolve(); return;
+                    }
+
+                    const existing = Array.isArray(data?.[ZHS_SHARED_PREVIEW_RESULTS_KEY]) ? data[ZHS_SHARED_PREVIEW_RESULTS_KEY] : [];
+                    const deduped = existing.filter((item) => {
+                        const sameUrl = String(item?.fileUrl || '') === String(fileInfo.fileUrl || '');
+                        return !sameUrl;
+                    });
+
+                    deduped.push({
+                        fileName: fileInfo.fileName,
+                        fileUrl: fileInfo.fileUrl,
+                        content: fileInfo.content,
+                        analysis: fileInfo.analysis || null,
+                        timestamp: Date.now(),
+                        source
+                    });
+
+                    const limited = deduped.slice(-PREVIEW_CACHE_MAX_ITEMS);
+                    chrome.storage.local.set({ [ZHS_SHARED_PREVIEW_RESULTS_KEY]: limited }, () => {
+                        if (chrome.runtime.lastError) {
+                            appLogger.warn('⚠️ [Preview共享缓存] 写入失败:', chrome.runtime.lastError.message);
+                            resolve(); return;
+                        }
+                        appLogger.info(`💾 [Preview共享缓存] 已写入: ${fileInfo.fileName}（共${limited.length}条）`);
+                        resolve();
+                    });
+                });
+            } catch (e) {
+                appLogger.warn('⚠️ [Preview共享缓存] 持久化异常:', e.message);
+                resolve();
+            }
+        }));
+    }
+
+    async function pullSharedPreviewResultsFromStorage(reason = 'manual') {
+        return new Promise((resolve) => {
+            try {
+                if (!chrome?.storage?.local) {
+                    resolve(0);
+                    return;
+                }
+
+                chrome.storage.local.get([ZHS_SHARED_PREVIEW_RESULTS_KEY], (data) => {
+                    if (chrome.runtime.lastError) {
+                        appLogger.warn('⚠️ [Preview共享缓存] 拉取失败:', chrome.runtime.lastError.message);
+                        resolve(0);
+                        return;
+                    }
+
+                    const records = Array.isArray(data?.[ZHS_SHARED_PREVIEW_RESULTS_KEY]) ? data[ZHS_SHARED_PREVIEW_RESULTS_KEY] : [];
+                    let added = 0;
+                    for (const record of records) {
+                        if (mergePreviewResultIntoMemory(record, `共享存储/${reason}`)) {
+                            added++;
+                        }
+                    }
+
+                    if (added > 0) {
+                        appLogger.info(`✅ [Preview共享缓存] 拉取成功(${reason})，新增 ${added} 条`);
+                    }
+                    resolve(added);
+                });
+            } catch (e) {
+                appLogger.warn('⚠️ [Preview共享缓存] 拉取异常:', e.message);
+                resolve(0);
+            }
+        });
+    }
+
+    window.addEventListener('message', (event) => {
+        // 只接受特定类型的消息
+        if (event.data && event.data.type === 'ZHS_PREVIEW_FILE_READY') {
+            const fileInfo = event.data.data;
+            appLogger.info('✅ [主页面] 收到preview页面的文件信息:', {
+                fileName: fileInfo?.fileName,
+                fileUrl: fileInfo?.fileUrl?.substring(0, 100),
+                contentLength: fileInfo?.content?.length || 0,
+                hasAnalysis: !!fileInfo?.analysis
+            });
+
+            // 如果有分析结果，详细记录
+            if (fileInfo?.analysis) {
+                appLogger.info('📊 [主页面] 文件内容分析:', {
+                    title: fileInfo.analysis.title || '(无标题)',
+                    structure: {
+                        hasTitle: fileInfo.analysis.structure.hasTitle,
+                        hasQuestions: fileInfo.analysis.structure.hasQuestions,
+                        hasAnswers: fileInfo.analysis.structure.hasAnswers
+                    },
+                    questionCount: fileInfo.analysis.questions?.length || 0,
+                    answerCount: fileInfo.analysis.answers?.length || 0,
+                    explanationCount: fileInfo.analysis.answerExplanations?.length || 0,
+                    keyPointCount: fileInfo.analysis.keyPoints?.length || 0
+                });
+
+                // 记录所有题目和答案（包括解析）
+                if (fileInfo.analysis.questions?.length > 0) {
+                    appLogger.info('📝 [主页面] 识别到的所有题目:');
+                    fileInfo.analysis.questions.forEach((q, i) => {
+                        appLogger.info(`  ${i+1}. ${q.substring(0, 100)}${q.length > 100 ? '...' : ''}`);
+                    });
+                }
+
+                if (fileInfo.analysis.answers?.length > 0) {
+                    appLogger.info('✅ [主页面] 识别到的所有答案:');
+                    fileInfo.analysis.answers.forEach((a, i) => {
+                        appLogger.info(`  ${i + 1}. 答案: ${a.substring(0, 80)}${a.length > 80 ? '...' : ''}`);
+                        if (fileInfo.analysis.answerExplanations?.[i]) {
+                            appLogger.info(`     解析: ${fileInfo.analysis.answerExplanations[i].substring(0, 80)}${fileInfo.analysis.answerExplanations[i].length > 80 ? '...' : ''}`);
+                        }
+                    });
+                }
+            }
+            
+            // 存储到数组中，供附件提取使用（带去重）
+            const merged = mergePreviewResultIntoMemory({
+                fileName: fileInfo.fileName,
+                fileUrl: fileInfo.fileUrl,
+                content: fileInfo.content,
+                analysis: fileInfo.analysis || null,
+                timestamp: Date.now()
+            }, 'postMessage');
+
+            if (merged) {
+                persistPreviewResultToSharedStore(fileInfo, 'main-postMessage');
+            }
+
+            appLogger.info(`📎 [主页面] 已缓存文件信息（共${window._zhsPreviewFileResults.length}个），${fileInfo?.analysis ? '包含分析' : '无分析'}`);
+        }
+    });
+
     // 班级级别的统计信息与能力画像
     const CLASS_ANALYTICS = {
         errorCounts: {},              // {category: count}
@@ -269,7 +861,12 @@ window.addEventListener('unhandledrejection', (e) => {
     // 测试与background的连接
     function testBackgroundConnection() {
         appLogger.debug('🔍 [Content] 测试background连接...');
+        const timeoutId = setTimeout(() => {
+            appLogger.warn('⚠️ [Content] Background连接超时（5秒无响应），可能需要刷新页面');
+        }, 5000);
+
         chrome.runtime.sendMessage({ action: 'ping' }, (response) => {
+            clearTimeout(timeoutId);
             if (chrome.runtime.lastError) {
                 appLogger.error('❌ [Content] Background连接失败:', chrome.runtime.lastError.message);
                 appLogger.error('❌ [Content] 请刷新页面或重新加载扩展');
@@ -452,6 +1049,200 @@ window.addEventListener('unhandledrejection', (e) => {
     };
 
     // ==========================================
+    // 自动跳转与任务接力
+    // ==========================================
+    const PENDING_TASK_KEY = 'zhai_pending_task_v1';
+    const PENDING_TASK_TTL_MS = 3 * 60 * 1000;
+
+    function isHomeworkContextPage() {
+        const url = String(window.location.href || '').toLowerCase();
+        const byUrl = url.includes('homework') || url.includes('work') || url.includes('assignment') || url.includes('exam');
+        if (byUrl) return true;
+
+        const byDom = !!(
+            document.querySelector('table tbody tr') ||
+            document.querySelector('[class*="homework"]') ||
+            document.querySelector('[class*="assignment"]') ||
+            document.querySelector('[class*="exam"]') ||
+            document.querySelector('.el-table__body')
+        );
+        return byDom;
+    }
+
+    function savePendingTask(action, payload = {}) {
+        try {
+            const task = {
+                action,
+                payload,
+                createdAt: Date.now(),
+                fromUrl: window.location.href
+            };
+            localStorage.setItem(PENDING_TASK_KEY, JSON.stringify(task));
+            appLogger.info('🧭 [自动跳转] 已保存待执行任务:', action);
+        } catch (error) {
+            appLogger.warn('⚠️ [自动跳转] 保存待执行任务失败:', error.message);
+        }
+    }
+
+    function readPendingTask() {
+        try {
+            const raw = localStorage.getItem(PENDING_TASK_KEY);
+            if (!raw) return null;
+            const task = JSON.parse(raw);
+            if (!task || !task.createdAt || Date.now() - task.createdAt > PENDING_TASK_TTL_MS) {
+                localStorage.removeItem(PENDING_TASK_KEY);
+                return null;
+            }
+            return task;
+        } catch (error) {
+            localStorage.removeItem(PENDING_TASK_KEY);
+            return null;
+        }
+    }
+
+    function clearPendingTask() {
+        localStorage.removeItem(PENDING_TASK_KEY);
+    }
+
+    function isElementVisible(el) {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function tryNavigateToHomeworkPage() {
+        const candidateSelectors = [
+            'a[href*="homework"]',
+            'a[href*="exam"]',
+            'a[href*="work"]',
+            'a[href*="assignment"]',
+            'button',
+            '[role="button"]',
+            'span',
+            'div'
+        ];
+
+        const keywordRegex = /(作业|考试|测验|批改|待批改|assignment|homework|exam|quiz|test)/i;
+        const visited = new Set();
+        const candidates = [];
+
+        candidateSelectors.forEach((selector) => {
+            document.querySelectorAll(selector).forEach((el) => {
+                if (visited.has(el)) return;
+                visited.add(el);
+                if (!isElementVisible(el)) return;
+
+                const text = String(el.textContent || '').trim();
+                const href = String(el.getAttribute?.('href') || '').toLowerCase();
+                if (!keywordRegex.test(text) && !href.includes('homework') && !href.includes('assignment') && !href.includes('exam')) {
+                    return;
+                }
+                candidates.push(el);
+            });
+        });
+
+        if (candidates.length === 0) {
+            appLogger.warn('⚠️ [自动跳转] 未找到作业/考试入口元素');
+            return false;
+        }
+
+        const target = candidates[0];
+        const href = target.getAttribute?.('href');
+        appLogger.info('🧭 [自动跳转] 命中入口:', (target.textContent || '').trim().slice(0, 30));
+
+        if (href && href !== '#' && !href.toLowerCase().startsWith('javascript')) {
+            window.location.href = href;
+            return true;
+        }
+
+        target.click();
+        return true;
+    }
+
+    async function executeFeatureAction(action, payload = {}) {
+        if (action === 'triggerAutoGrading') {
+            await startAutoGradingFlow();
+            return;
+        }
+        if (action === 'triggerHomeworkAnalysis') {
+            await startHomeworkAnalysis();
+            return;
+        }
+        if (action === 'triggerOneClickRemind') {
+            await startOneClickRemind();
+            return;
+        }
+        if (action === 'triggerSingleStudent') {
+            await startSingleStudentGrading(payload.studentName || '');
+            return;
+        }
+        if (action === 'triggerManualCriteria') {
+            openManualCriteriaEditor();
+            return;
+        }
+    }
+
+    async function runOrQueueFeatureAction(action, payload = {}) {
+        const shouldRequireHomeworkPage = [
+            'triggerAutoGrading',
+            'triggerHomeworkAnalysis',
+            'triggerOneClickRemind',
+            'triggerSingleStudent'
+        ].includes(action);
+
+        // manual: 不自动跳转、不做任务接力
+        if (AUTO_GRADING_STATE.autoExecutionMode === AUTO_EXECUTION_MODES.manual) {
+            await executeFeatureAction(action, payload);
+            return { queued: false, mode: AUTO_EXECUTION_MODES.manual };
+        }
+
+        if (!shouldRequireHomeworkPage || isHomeworkContextPage()) {
+            await executeFeatureAction(action, payload);
+            return { queued: false, mode: AUTO_GRADING_STATE.autoExecutionMode };
+        }
+
+        savePendingTask(action, payload);
+        const started = tryNavigateToHomeworkPage();
+        if (started) {
+            const tip = AUTO_GRADING_STATE.autoExecutionMode === AUTO_EXECUTION_MODES.navigateOnly
+                ? '🧭 已自动跳转到作业页，到达后请手动点击执行'
+                : '🧭 已自动跳转到作业页，到达后会自动执行任务';
+            showNotification(tip, '#2b2b2b');
+            return { queued: true, mode: AUTO_GRADING_STATE.autoExecutionMode };
+        }
+
+        return { queued: true, needManualNavigate: true, mode: AUTO_GRADING_STATE.autoExecutionMode };
+    }
+
+    // 暴露到全局作用域，供 content-floating-ball.js 调用
+    window.runOrQueueFeatureAction = runOrQueueFeatureAction;
+
+    async function resumePendingTaskIfNeeded() {
+        const task = readPendingTask();
+        if (!task) return;
+
+        appLogger.info('🧭 [自动跳转] 检测到待执行任务:', task.action);
+        if (!isHomeworkContextPage()) {
+            tryNavigateToHomeworkPage();
+            return;
+        }
+
+        clearPendingTask();
+        if (AUTO_GRADING_STATE.autoExecutionMode === AUTO_EXECUTION_MODES.navigateOnly) {
+            showNotification('✅ 已到达作业页，请手动点击对应功能开始执行', '#4CAF50');
+            return;
+        }
+
+        showNotification('✅ 已到达作业页，自动继续执行任务', '#4CAF50');
+        try {
+            await executeFeatureAction(task.action, task.payload || {});
+        } catch (error) {
+            appLogger.error('❌ [自动跳转] 恢复任务失败:', error);
+            showNotification(`❌ 自动执行失败: ${error.message}`, '#FF5252');
+        }
+    }
+
+    // ==========================================
     // 1. 消息处理
     // ==========================================
     
@@ -485,8 +1276,8 @@ window.addEventListener('unhandledrejection', (e) => {
                 appLogger.info('🎯 [Popup] 触发自动批改');
                 (async () => {
                     try {
-                        await startAutoGradingFlow();
-                        sendResponse({ success: true, message: '自动批改已启动' });
+                        const result = await runOrQueueFeatureAction('triggerAutoGrading');
+                        sendResponse({ success: true, message: result.queued ? '已自动跳转，稍后自动执行自动批改' : '自动批改已启动' });
                     } catch (error) {
                         appLogger.error('❌ [Popup] 自动批改失败:', error);
                         sendResponse({ success: false, error: error.message });
@@ -499,8 +1290,8 @@ window.addEventListener('unhandledrejection', (e) => {
                 appLogger.info('🔍 [Popup] 触发作业分析');
                 (async () => {
                     try {
-                        await startHomeworkAnalysis();
-                        sendResponse({ success: true, message: 'AI作业分析已启动' });
+                        const result = await runOrQueueFeatureAction('triggerHomeworkAnalysis');
+                        sendResponse({ success: true, message: result.queued ? '已自动跳转，稍后自动执行作业分析' : 'AI作业分析已启动' });
                     } catch (error) {
                         appLogger.error('❌ [Popup] 作业分析失败:', error);
                         sendResponse({ success: false, error: error.message });
@@ -513,8 +1304,8 @@ window.addEventListener('unhandledrejection', (e) => {
                 appLogger.info('📢 [Popup] 触发一键催交');
                 (async () => {
                     try {
-                        await startOneClickRemind();
-                        sendResponse({ success: true, message: '一键催交已启动' });
+                        const result = await runOrQueueFeatureAction('triggerOneClickRemind');
+                        sendResponse({ success: true, message: result.queued ? '已自动跳转，稍后自动执行一键催交' : '一键催交已启动' });
                     } catch (error) {
                         appLogger.error('❌ [Popup] 一键催交失败:', error);
                         sendResponse({ success: false, error: error.message });
@@ -544,8 +1335,8 @@ window.addEventListener('unhandledrejection', (e) => {
                 }
                 (async () => {
                     try {
-                        await startSingleStudentGrading(studentName);
-                        sendResponse({ success: true, message: `已开始批改学生: ${studentName}` });
+                        const result = await runOrQueueFeatureAction('triggerSingleStudent', { studentName });
+                        sendResponse({ success: true, message: result.queued ? `已自动跳转，稍后自动批改: ${studentName}` : `已开始批改学生: ${studentName}` });
                     } catch (error) {
                         appLogger.error('❌ [Popup] 单人批改失败:', error);
                         sendResponse({ success: false, error: error.message });
@@ -569,11 +1360,29 @@ window.addEventListener('unhandledrejection', (e) => {
                 return false;
             }
 
+            if (request.action === 'toggleAutoMode') {
+                appLogger.debug('🔄 [Popup] 切换自动模式:', request.value);
+                setAutoExecutionMode(request.value !== false ? AUTO_EXECUTION_MODES.full : AUTO_EXECUTION_MODES.manual);
+                persistAutoExecutionModeSetting(AUTO_GRADING_STATE.autoExecutionMode);
+                sendResponse({ success: true, value: AUTO_GRADING_STATE.autoModeEnabled, mode: AUTO_GRADING_STATE.autoExecutionMode });
+                return false;
+            }
+
+            if (request.action === 'setAutoExecutionMode') {
+                appLogger.debug('🔄 [Popup] 设置自动执行模式:', request.mode);
+                setAutoExecutionMode(request.mode);
+                persistAutoExecutionModeSetting(AUTO_GRADING_STATE.autoExecutionMode);
+                sendResponse({ success: true, mode: AUTO_GRADING_STATE.autoExecutionMode, autoModeEnabled: AUTO_GRADING_STATE.autoModeEnabled });
+                return false;
+            }
+
             if (request.action === 'getExtensionSettings') {
                 sendResponse({
                     success: true,
                     includeReviewedSubmissions: AUTO_GRADING_STATE.includeReviewedSubmissions,
-                    showRuleScoringBreakdown: AUTO_GRADING_STATE.showRuleScoringBreakdown
+                    showRuleScoringBreakdown: AUTO_GRADING_STATE.showRuleScoringBreakdown,
+                    autoModeEnabled: AUTO_GRADING_STATE.autoModeEnabled,
+                    autoExecutionMode: AUTO_GRADING_STATE.autoExecutionMode
                 });
                 return false;
             }
@@ -612,1550 +1421,19 @@ window.addEventListener('unhandledrejection', (e) => {
     });
 
     // ==========================================
-    // 2. 样式注入
+    // 2-5. UI组件和浮窗球
     // ==========================================
-    function injectStyles(){
-        if (document.getElementById('zhihuishu-ai-styles')) return;
-        const s = document.createElement('style'); 
-        s.id = 'zhihuishu-ai-styles';
-        s.textContent = `
-            /* 悬浮球 - 两个豆豆眼 */
-            .zh-floating-ball {
-                position: fixed;
-                top: 50%;
-                right: 20px;
-                width: 64px;
-                height: 64px;
-                border-radius: 50%;
-                background: radial-gradient(circle at 30% 28%, #f8f8f8 0%, #ececec 58%, #dfdfdf 100%);
-                border: 1px solid #cfcfcf;
-                box-shadow: 0 10px 20px rgba(0, 0, 0, 0.12), inset 0 -2px 10px rgba(255, 255, 255, 0.55), inset 0 -2px 8px rgba(0, 0, 0, 0.05);
-                cursor: pointer;
-                transition: transform 0.2s ease, box-shadow 0.2s ease;
-                z-index: 2147483647;
-                user-select: none;
-                overflow: hidden;
-                isolation: isolate;
-            }
-            .zh-floating-ball::before {
-                content: '';
-                position: absolute;
-                inset: -18% -32%;
-                border-radius: 50%;
-                background: linear-gradient(110deg, rgba(255, 255, 255, 0) 28%, rgba(255, 255, 255, 0.2) 45%, rgba(255, 255, 255, 0.06) 58%, rgba(255, 255, 255, 0) 72%);
-                pointer-events: none;
-                mix-blend-mode: screen;
-                opacity: 0.5;
-                transform: translateX(-8px) rotate(-7deg);
-                animation: zh-pearl-sheen 14s ease-in-out infinite;
-            }
-            .zh-floating-ball:hover {
-                transform: translateY(-1px) scale(1.08);
-                box-shadow: 0 14px 28px rgba(0, 0, 0, 0.16), inset 0 -2px 8px rgba(0, 0, 0, 0.08);
-            }
-            .zh-floating-ball.active {
-                transform: scale(1.08);
-            }
-            .zh-floating-ball.menu-open {
-                background: radial-gradient(circle at 30% 28%, #fafafa 0%, #ebebeb 52%, #d9d9d9 100%);
-                box-shadow: 0 12px 24px rgba(0, 0, 0, 0.14), inset 0 -2px 10px rgba(255, 255, 255, 0.55), inset 0 -2px 8px rgba(0, 0, 0, 0.06);
-            }
-            @keyframes zh-pearl-sheen {
-                0%,
-                100% {
-                    transform: translateX(-8px) rotate(-7deg);
-                    opacity: 0.58;
-                }
-                50% {
-                    transform: translateX(8px) rotate(-7deg);
-                    opacity: 0.72;
-                }
-            }
-            .zh-eye {
-                width: 11px;
-                height: 11px;
-                background: radial-gradient(circle at 30% 30%, #4a4a4a, #303030);
-                border-radius: 50%;
-                position: absolute;
-                top: 50%;
-                transition: transform 0.08s linear;
-            }
-            .zh-eye-left {
-                left: calc(50% - 17px);
-                margin-top: -5.5px;
-            }
-            .zh-eye-right {
-                left: calc(50% + 6px);
-                margin-top: -5.5px;
-            }
-            .zh-eye::after {
-                content: '';
-                position: absolute;
-                width: 3px;
-                height: 3px;
-                background: rgba(255, 255, 255, 0.56);
-                border-radius: 50%;
-                top: 2px;
-                left: 2px;
-            }
-
-            /* 散开按钮 */
-            .zh-action-btn {
-                position: relative;
-                padding: 10px 16px;
-                background: #f2f2f2;
-                color: #2b2b2b;
-                border: 1px solid #cdcdcd;
-                border-radius: 10px;
-                font-size: 13px;
-                font-weight: 700;
-                cursor: pointer;
-                box-shadow: 0 6px 14px rgba(0, 0, 0, 0.08);
-                z-index: 2147483647;
-                opacity: 1;
-                transform: none;
-                transition: transform 0.2s ease, box-shadow 0.2s ease;
-                pointer-events: auto;
-                white-space: nowrap;
-                user-select: none;
-                min-width: 0;
-                width: 100%;
-                text-align: center;
-            }
-            .zh-action-btn:hover {
-                transform: translateY(-1px);
-                box-shadow: 0 9px 18px rgba(0, 0, 0, 0.1);
-            }
-            .zh-action-btn:active {
-                transform: translateY(0);
-            }
-            .zh-action-btn.type-detect {
-                background: #f0f0f0;
-                color: #2b2b2b;
-            }
-            .zh-action-btn.type-auto {
-                background: #f2f2f2;
-                color: #2b2b2b;
-            }
-            .zh-action-btn.type-single {
-                background: #ededed;
-                color: #2b2b2b;
-            }
-            .zh-action-btn.type-remind {
-                background: #f6f6f6;
-                color: #4a4a4a;
-                border: 1px solid #d2d2d2;
-                box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
-            }
-            .zh-action-btn.type-remind:hover {
-                box-shadow: 0 8px 14px rgba(0, 0, 0, 0.08);
-            }
-            
-            /* 独立暂停按钮 */
-            .zh-pause-float-btn {
-                position: fixed;
-                bottom: 80px;
-                right: 20px;
-                padding: 12px 20px;
-                background: linear-gradient(135deg, #FF9800 0%, #FF6B00 100%);
-                color: white;
-                border: none;
-                border-radius: 12px;
-                font-size: 14px;
-                font-weight: 700;
-                cursor: pointer;
-                box-shadow: 0 8px 20px rgba(255, 107, 0, 0.35);
-                z-index: 2147483646;
-                display: none;
-                transition: all 0.3s ease;
-            }
-            .zh-pause-float-btn.show {
-                display: block;
-            }
-            .zh-pause-float-btn:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 10px 24px rgba(255, 107, 0, 0.45);
-            }
-            .zh-pause-float-btn.paused {
-                background: linear-gradient(135deg, #4CAF50 0%, #2E7D32 100%);
-                box-shadow: 0 8px 20px rgba(76, 175, 80, 0.35);
-            }
-            .zh-pause-float-btn.paused:hover {
-                box-shadow: 0 10px 24px rgba(76, 175, 80, 0.45);
-            }
-
-            /* 散开输入框 */
-            .zh-action-input {
-                position: relative;
-                padding: 9px 12px;
-                background: #f5f5f5;
-                border: 1px solid #cfcfcf;
-                border-radius: 10px;
-                font-size: 13px;
-                font-weight: 600;
-                outline: none;
-                box-shadow: none;
-                z-index: 2147483647;
-                opacity: 1;
-                transform: none;
-                transition: border-color 0.2s ease, box-shadow 0.2s ease;
-                pointer-events: auto;
-                width: 100%;
-            }
-            /* 功能菜单容器 */
-            .zh-action-menu {
-                position: fixed;
-                display: flex;
-                flex-direction: column;
-                gap: 14px;
-                padding: 18px 16px 16px;
-                width: 380px;
-                background: rgba(236, 236, 236, 0.96);
-                border: 1px solid #d2d2d2;
-                border-radius: 18px;
-                box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
-                backdrop-filter: blur(4px);
-                z-index: 2147483646;
-                opacity: 0;
-                transform: translateY(-6px) scale(0.98);
-                transition: opacity 0.2s ease, transform 0.2s ease;
-                pointer-events: none;
-            }
-            .zh-action-menu.show {
-                opacity: 1;
-                transform: translateY(0) scale(1);
-                pointer-events: auto;
-            }
-            .zh-action-group {
-                display: flex;
-                gap: 10px;
-                align-items: center;
-            }
-            .zh-action-group.batch {
-                gap: 10px;
-            }
-            .zh-action-group.batch .zh-action-btn {
-                flex: 1;
-            }
-            .zh-action-group.single {
-                background: #f0f0f0;
-                border-radius: 12px;
-                padding: 8px;
-                box-shadow: inset 0 0 0 1px #d3d3d3;
-            }
-            .zh-action-group.single .zh-action-input {
-                flex: 1;
-            }
-            .zh-action-group.single .zh-action-btn {
-                width: auto;
-                min-width: 96px;
-                padding: 9px 12px;
-            }
-            .zh-action-group.settings {
-                background: #e9e9e9;
-                border: 1px solid #d0d0d0;
-                border-radius: 10px;
-                padding: 10px 12px;
-                margin-top: 6px;
-            }
-            .zh-action-group.settings input[type="checkbox"] {
-                accent-color: #2a2a2a;
-                cursor: pointer;
-                margin: 0;
-            }
-            .zh-action-group.settings label {
-                margin: 0 !important;
-                padding: 0;
-                cursor: pointer;
-                font-size: 12px;
-                color: #4a4a4a;
-                white-space: nowrap;
-            }
-            .zh-action-input:focus {
-                border-color: #bdbdbd;
-                background: #fcfcfc;
-                box-shadow: none;
-            }
-
-            /* 自动补全下拉列表 */
-            .zh-autocomplete-dropdown {
-                position: absolute;
-                top: calc(100% + 6px);
-                left: 0;
-                right: 0;
-                max-height: 200px;
-                overflow-y: auto;
-                background: #f4f4f4;
-                border: 1px solid #cecece;
-                border-radius: 10px;
-                box-shadow: 0 8px 18px rgba(0, 0, 0, 0.1);
-                z-index: 2147483648;
-                display: none;
-                opacity: 0;
-                transform: translateY(-4px);
-                transition: opacity 0.15s ease, transform 0.15s ease;
-            }
-            .zh-autocomplete-dropdown.show {
-                display: block;
-                opacity: 1;
-                transform: translateY(0);
-            }
-            .zh-autocomplete-item {
-                padding: 10px 14px;
-                cursor: pointer;
-                font-size: 13px;
-                color: #3d3d3d;
-                border-bottom: 1px solid #dddddd;
-                transition: background 0.12s ease, color 0.12s ease;
-            }
-            .zh-autocomplete-item:last-child {
-                border-bottom: none;
-            }
-            .zh-autocomplete-item:hover,
-            .zh-autocomplete-item.active {
-                background: #e9e9e9;
-                color: #222;
-            }
-            .zh-autocomplete-empty {
-                padding: 14px;
-                text-align: center;
-                color: #8a8a8a;
-                font-size: 12px;
-            }
-
-            /* 浮动面板 */
-            .zh-floating-panel {
-                position: fixed;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                width: 420px;
-                max-height: 600px;
-                background: white;
-                border-radius: 16px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                z-index: 2147483646;
-                display: flex;
-                flex-direction: column;
-                animation: slideIn 0.3s ease;
-            }
-            @keyframes slideIn {
-                from { opacity: 0; transform: translate(-50%, -48%); }
-                to { opacity: 1; transform: translate(-50%, -50%); }
-            }
-
-            .zh-panel-header {
-                padding: 16px 20px;
-                border-bottom: 1px solid #e5e7eb;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                cursor: move;
-                user-select: none;
-            }
-            .zh-panel-header h3 {
-                margin: 0;
-                font-size: 16px;
-                font-weight: 600;
-                color: #1f2937;
-            }
-            .zh-panel-close {
-                width: 32px;
-                height: 32px;
-                border: none;
-                background: transparent;
-                cursor: pointer;
-                font-size: 20px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                border-radius: 6px;
-                transition: all 0.2s;
-            }
-            .zh-panel-close:hover {
-                background: #f3f4f6;
-            }
-
-            .zh-panel-body {
-                flex: 1;
-                overflow-y: auto;
-                padding: 16px;
-            }
-
-            /* 状态环 */
-            #zh-status-ring {
-                display: none;
-                position: absolute;
-                top: -8px;
-                right: -8px;
-                width: 64px;
-                height: 64px;
-                border: 4px solid transparent;
-                border-radius: 50%;
-                animation: spin 2s linear infinite;
-            }
-            #zh-status-ring.active {
-                display: block;
-            }
-            @keyframes spin {
-                to { transform: rotate(360deg); }
-            }
-
-            /* 通知动画 */
-            @keyframes slideInRight {
-                from {
-                    opacity: 0;
-                    transform: translateX(100px);
-                }
-                to {
-                    opacity: 1;
-                    transform: translateX(0);
-                }
-            }
-            @keyframes slideOutRight {
-                from {
-                    opacity: 1;
-                    transform: translateX(0);
-                }
-                to {
-                    opacity: 0;
-                    transform: translateX(100px);
-                }
-            }
-        `;
-        document.head.appendChild(s);
-    }
-
-    // ==========================================
-    // 3. 浮窗球创建
-    // ==========================================
-    function createFloatingBall(){
-        try {
-            appLogger.debug('📌 [createFloatingBall] 开始创建浮窗球...');
-            injectStyles();
-            appLogger.debug('✅ [createFloatingBall] 样式已注入');
-            
-            if (document.getElementById('zhihuishu-ai-floating-ball')) {
-                appLogger.debug('⚠️ [createFloatingBall] 浮窗球已存在，跳过');
-                return;
-            }
-
-            const ball = document.createElement('div');
-        ball.id = 'zhihuishu-ai-floating-ball';
-        ball.className = 'zh-floating-ball';
-        ball.title = '打开智能阅卷菜单';
-
-        // 创建两个豆豆眼
-        const leftEye = document.createElement('div');
-        leftEye.className = 'zh-eye zh-eye-left';
-        const rightEye = document.createElement('div');
-        rightEye.className = 'zh-eye zh-eye-right';
-        
-        ball.appendChild(leftEye);
-        ball.appendChild(rightEye);
-
-        // 眼球追踪效果
-        document.addEventListener('mousemove', (e) => {
-            const rect = ball.getBoundingClientRect();
-            const ballCenterX = rect.left + rect.width / 2;
-            const ballCenterY = rect.top + rect.height / 2;
-            const deltaX = e.clientX - ballCenterX;
-            const deltaY = e.clientY - ballCenterY;
-            const angle = Math.atan2(deltaY, deltaX);
-            const pointerDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-            const moveFactor = Math.min(pointerDistance / 180, 1);
-            const maxOffset = 2.2;
-            const translateX = Math.cos(angle) * maxOffset * moveFactor;
-            const translateY = Math.sin(angle) * maxOffset * moveFactor;
-            leftEye.style.transform = `translate(${translateX}px, ${translateY}px)`;
-            rightEye.style.transform = `translate(${translateX}px, ${translateY}px)`;
-        });
-
-        const ring = document.createElement('div');
-        ring.id = 'zh-status-ring';
-        ball.appendChild(ring);
-
-        // 创建散开按钮 - 分两排
-        // 第一排：AI分析、手动设置
-        const row1Actions = [
-            { id: 'analyze', text: 'AI分析', type: 'auto' },
-            { id: 'manual-criteria', text: '✏️ 手动设置', type: 'remind' }
-        ];
-        
-        // 第二排：自动批改、催交未交
-        const row2Actions = [
-            { id: 'auto', text: '自动批改', type: 'auto' },
-            { id: 'remind', text: '催交未交', type: 'remind' }
-        ];
-
-        const actionMenu = document.createElement('div');
-        actionMenu.className = 'zh-action-menu';
-        document.body.appendChild(actionMenu);
-
-        // 创建第一排按钮组
-        const batchGroup1 = document.createElement('div');
-        batchGroup1.className = 'zh-action-group batch';
-        actionMenu.appendChild(batchGroup1);
-
-        const actionButtons = [];
-        let btnIndex = 0;
-        
-        row1Actions.forEach((action) => {
-            const btn = document.createElement('button');
-            btn.className = `zh-action-btn type-${action.type}`;
-            btn.textContent = action.text;
-            btn.dataset.action = action.id;
-            btn.dataset.index = btnIndex++;
-            batchGroup1.appendChild(btn);
-            actionButtons.push(btn);
-        });
-        
-        // 创建第二排按钮组
-        const batchGroup2 = document.createElement('div');
-        batchGroup2.className = 'zh-action-group batch';
-        actionMenu.appendChild(batchGroup2);
-        
-        row2Actions.forEach((action) => {
-            const btn = document.createElement('button');
-            btn.className = `zh-action-btn type-${action.type}`;
-            btn.textContent = action.text;
-            btn.dataset.action = action.id;
-            btn.dataset.index = btnIndex++;
-            batchGroup2.appendChild(btn);
-            actionButtons.push(btn);
-        });
-
-        // 创建单人批改输入框和按钮
-        const singleInput = document.createElement('input');
-        singleInput.className = 'zh-action-input';
-        singleInput.placeholder = '输入学生姓名';
-        singleInput.id = 'zh-single-input';
-        singleInput.autocomplete = 'off';
-        const singleGroup = document.createElement('div');
-        singleGroup.className = 'zh-action-group single';
-        singleGroup.style.position = 'relative'; // 为下拉列表提供定位基准
-        actionMenu.appendChild(singleGroup);
-        singleGroup.appendChild(singleInput);
-
-        // 创建自动补全下拉列表
-        const autocompleteDropdown = document.createElement('div');
-        autocompleteDropdown.className = 'zh-autocomplete-dropdown';
-        autocompleteDropdown.id = 'zh-autocomplete-dropdown';
-        singleGroup.appendChild(autocompleteDropdown);
-
-        // 自动补全相关变量
-        let currentSuggestions = [];
-        let selectedSuggestionIndex = -1;
-
-        // 加载学生姓名缓存
-        async function loadStudentNameCache() {
-            if (AUTO_GRADING_STATE.studentNameCacheLoaded) {
-                appLogger.debug('📋 [自动补全] 学生姓名缓存已加载，跳过');
-                return;
-            }
-            
-            appLogger.info('📋 [自动补全] 开始加载学生姓名...');
-            try {
-                const studentList = await detectStudentList();
-                AUTO_GRADING_STATE.studentNameCache = studentList.map(s => s.name);
-                AUTO_GRADING_STATE.studentNameCacheLoaded = true;
-                appLogger.debug(`✅ [自动补全] 已缓存 ${AUTO_GRADING_STATE.studentNameCache.length} 个学生姓名:`, AUTO_GRADING_STATE.studentNameCache);
-            } catch (error) {
-                appLogger.error('❌ [自动补全] 加载学生姓名失败:', error);
-                AUTO_GRADING_STATE.studentNameCache = [];
-            }
-        }
-
-        // 显示自动补全建议
-        function showAutocompleteSuggestions(query) {
-            if (!query) {
-                autocompleteDropdown.classList.remove('show');
-                currentSuggestions = [];
-                selectedSuggestionIndex = -1;
-                return;
-            }
-
-            // 过滤匹配的学生姓名
-            currentSuggestions = AUTO_GRADING_STATE.studentNameCache.filter(name => 
-                name.includes(query)
-            );
-
-            if (currentSuggestions.length === 0) {
-                autocompleteDropdown.innerHTML = '<div class="zh-autocomplete-empty">未找到匹配的学生</div>';
-                autocompleteDropdown.classList.add('show');
-                return;
-            }
-
-            // 渲染建议列表
-            autocompleteDropdown.innerHTML = currentSuggestions.map((name, index) => 
-                `<div class="zh-autocomplete-item" data-index="${index}">${name}</div>`
-            ).join('');
-
-            // 为每个建议项添加点击事件
-            autocompleteDropdown.querySelectorAll('.zh-autocomplete-item').forEach(item => {
-                item.addEventListener('click', () => {
-                    singleInput.value = item.textContent;
-                    autocompleteDropdown.classList.remove('show');
-                    currentSuggestions = [];
-                    selectedSuggestionIndex = -1;
-                });
-            });
-
-            autocompleteDropdown.classList.add('show');
-            selectedSuggestionIndex = -1;
-        }
-
-        // 输入框事件：输入时触发自动补全
-        singleInput.addEventListener('input', (e) => {
-            const query = e.target.value.trim();
-            showAutocompleteSuggestions(query);
-        });
-
-        // 输入框事件：键盘导航
-        singleInput.addEventListener('keydown', (e) => {
-            if (!autocompleteDropdown.classList.contains('show')) return;
-
-            if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                selectedSuggestionIndex = Math.min(selectedSuggestionIndex + 1, currentSuggestions.length - 1);
-                updateSelectedSuggestion();
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                selectedSuggestionIndex = Math.max(selectedSuggestionIndex - 1, -1);
-                updateSelectedSuggestion();
-            } else if (e.key === 'Enter' || e.key === 'Tab') {
-                if (selectedSuggestionIndex >= 0) {
-                    e.preventDefault();
-                    singleInput.value = currentSuggestions[selectedSuggestionIndex];
-                    autocompleteDropdown.classList.remove('show');
-                    currentSuggestions = [];
-                    selectedSuggestionIndex = -1;
-                }
-            } else if (e.key === 'Escape') {
-                autocompleteDropdown.classList.remove('show');
-                currentSuggestions = [];
-                selectedSuggestionIndex = -1;
-            }
-        });
-
-        // 输入框失焦时隐藏下拉列表（延迟以允许点击）
-        singleInput.addEventListener('blur', () => {
-            setTimeout(() => {
-                autocompleteDropdown.classList.remove('show');
-                currentSuggestions = [];
-                selectedSuggestionIndex = -1;
-            }, 200);
-        });
-
-        // 输入框获焦时加载学生姓名缓存
-        singleInput.addEventListener('focus', () => {
-            if (!AUTO_GRADING_STATE.studentNameCacheLoaded) {
-                loadStudentNameCache();
-            }
-        });
-
-        // 更新选中的建议项高亮
-        function updateSelectedSuggestion() {
-            const items = autocompleteDropdown.querySelectorAll('.zh-autocomplete-item');
-            items.forEach((item, index) => {
-                if (index === selectedSuggestionIndex) {
-                    item.classList.add('active');
-                    item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-                } else {
-                    item.classList.remove('active');
-                }
-            });
-        }
-
-        const singleBtn = document.createElement('button');
-        singleBtn.className = 'zh-action-btn type-single';
-        singleBtn.textContent = '批改此人';
-        singleBtn.dataset.action = 'single';
-        singleBtn.dataset.index = '3';
-        singleGroup.appendChild(singleBtn);
-        actionButtons.push(singleBtn);
-
-        // 创建设置选项组（重新批阅选项）
-        const settingsGroup = document.createElement('div');
-        settingsGroup.className = 'zh-action-group settings';
-        settingsGroup.style.cssText = 'display: flex; align-items: center; padding: 10px; border-top: 1px solid #eee; gap: 8px;';
-        actionMenu.appendChild(settingsGroup);
-
-        const toggleCheckbox = document.createElement('input');
-        toggleCheckbox.type = 'checkbox';
-        toggleCheckbox.id = 'zh-include-reviewed-toggle';
-        toggleCheckbox.checked = AUTO_GRADING_STATE.includeReviewedSubmissions;
-        toggleCheckbox.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
-        
-        const toggleLabel = document.createElement('label');
-        toggleLabel.htmlFor = 'zh-include-reviewed-toggle';
-        toggleLabel.textContent = '包括已批阅';
-        toggleLabel.style.cssText = 'cursor: pointer; user-select: none; font-size: 12px; margin: 0;';
-        
-        settingsGroup.appendChild(toggleCheckbox);
-        settingsGroup.appendChild(toggleLabel);
-        
-        toggleCheckbox.addEventListener('change', (e) => {
-            AUTO_GRADING_STATE.includeReviewedSubmissions = e.target.checked;
-            appLogger.debug(`🔄 [设置] 重新批阅已批作业: ${e.target.checked ? '启用' : '禁用'}`);
-        });
-
-        // 创建暂停/继续按钮组
-        const pauseControlGroup = document.createElement('div');
-        pauseControlGroup.className = 'zh-action-group batch';
-        pauseControlGroup.id = 'zh-pause-control-group';
-        pauseControlGroup.style.cssText = 'display: none; margin-top: 8px;';
-        actionMenu.appendChild(pauseControlGroup);
-
-        const pauseBtn = document.createElement('button');
-        pauseBtn.className = 'zh-action-btn type-remind';
-        pauseBtn.textContent = '⏸️ 暂停批改';
-        pauseBtn.id = 'zh-pause-btn';
-        pauseControlGroup.appendChild(pauseBtn);
-
-        pauseBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (AUTO_GRADING_STATE.isPaused) {
-                // 继续
-                AUTO_GRADING_STATE.isPaused = false;
-                pauseBtn.textContent = '⏸️ 暂停批改';
-                pauseBtn.className = 'zh-action-btn type-remind';
-                appLogger.info('▶️ [暂停控制] 继续批改');
-                showNotification('继续批改', '#4CAF50');
-            } else {
-                // 暂停
-                AUTO_GRADING_STATE.isPaused = true;
-                pauseBtn.textContent = '▶️ 继续批改';
-                pauseBtn.className = 'zh-action-btn type-auto';
-                appLogger.info('⏸️ [暂停控制] 已发出暂停指令，将在安全点暂停');
-                showNotification('⏸️ 已暂停（当前步骤完成后生效）', '#FF9800');
-            }
-        });
-
-        let menuOpen = false;
-
-        const toggleMenu = () => {
-            if (menuOpen) {
-                closeActionButtons();
-            } else {
-                openActionButtons();
-            }
-        };
-
-        const openActionButtons = () => {
-            menuOpen = true;
-            ball.classList.add('active');
-            ball.classList.add('menu-open');
-            const rect = ball.getBoundingClientRect();
-            const ballLeft = rect.left;
-            const ballTop = rect.top;
-            const ballRight = rect.right;
-            const menuWidth = 380;
-            const menuHeight = 330;
-            const windowWidth = window.innerWidth;
-            const windowHeight = window.innerHeight;
-            const padding = 15; // 屏幕边界留白
-
-            // ============ 水平位置计算 ============
-            // 优先中心对齐，如果超出右边界则靠左对齐
-            let menuLeft = ballLeft + (rect.width - menuWidth) / 2;
-            
-            // 检查是否超出右边界
-            if (menuLeft + menuWidth > windowWidth - padding) {
-                // 改为从球的左侧显示（菜单在球的左边）
-                menuLeft = ballLeft - menuWidth - 10;
-                
-                // 如果还是超出左边界，就右对齐到球的左边界
-                if (menuLeft < padding) {
-                    menuLeft = ballLeft - menuWidth - 5;
-                }
-            }
-
-            // ============ 垂直位置计算 ============
-            // 优先显示在球的下方
-            let menuTop = ballTop + rect.height - 18;
-            
-            // 检查是否超出下边界
-            if (menuTop + menuHeight > windowHeight - padding) {
-                // 改为显示在球的上方
-                menuTop = ballTop - menuHeight - 10;
-            }
-
-            actionMenu.style.left = `${Math.max(padding, menuLeft)}px`;
-            actionMenu.style.top = `${Math.max(padding, menuTop)}px`;
-            actionMenu.style.right = 'auto';
-            setTimeout(() => actionMenu.classList.add('show'), 0);
-        };
-
-        const closeActionButtons = () => {
-            menuOpen = false;
-            ball.classList.remove('active');
-            ball.classList.remove('menu-open');
-            actionMenu.classList.remove('show');
-        };
-
-        ball.addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleMenu();
-        });
-
-        actionButtons.forEach(btn => {
-            btn.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                const action = btn.dataset.action;
-                closeActionButtons();
-
-                if (action === 'auto') {
-                    await startAutoGradingFlow();
-                } else if (action === 'remind') {
-                    await startOneClickRemind();
-                } else if (action === 'analyze') {
-                    await startHomeworkAnalysis();
-                } else if (action === 'manual-criteria') {
-                    openManualCriteriaEditor();
-                } else if (action === 'single') {
-                    const name = singleInput.value.trim();
-                    if (!name) {
-                        alert('请输入学生姓名');
-                        singleInput.classList.add('show');
-                        singleInput.focus();
-                        return;
-                    }
-                    await startSingleStudentGrading(name);
-                    singleInput.value = '';
-                }
-            });
-        });
-
-        document.addEventListener('click', (e) => {
-            if (!menuOpen) return;
-            if (ball.contains(e.target)) return;
-            if (actionMenu.contains(e.target)) return;
-            if (actionButtons.some(btn => btn.contains(e.target))) return;
-            if (singleInput.contains(e.target)) return;
-            closeActionButtons();
-        });
-
-        // 拖拽
-        makeDraggable(ball);
-        document.body.appendChild(ball);
-        
-        const ballRect = document.getElementById('zhihuishu-ai-floating-ball');
-        if (ballRect) {
-            appLogger.info('✅ [createFloatingBall] 浮窗球已成功创建并添加到页面');
-            appLogger.debug('✅ [createFloatingBall] 浮窗球位置信息:', ballRect.getBoundingClientRect());
-        } else {
-            appLogger.error('❌ [createFloatingBall] 浮窗球创建失败');
-        }
-        
-        } catch (error) {
-            appLogger.error('❌ [createFloatingBall] 创建浮窗球时出错:', error);
-            appLogger.debug('❌ [createFloatingBall] 错误堆栈:', error.stack);
-        }
-    }
-
-    function makeDraggable(el) {
-        let dragging = false, startX, startY, initialX, initialY;
-        
-        el.addEventListener('mousedown', (e) => {
-            dragging = true;
-            startX = e.clientX;
-            startY = e.clientY;
-            const rect = el.getBoundingClientRect();
-            initialX = rect.left;
-            initialY = rect.top;
-            el.style.transition = 'none';
-        });
-        
-        document.addEventListener('mousemove', (e) => {
-            if (!dragging) return;
-            const newX = initialX + (e.clientX - startX);
-            const newY = initialY + (e.clientY - startY);
-            el.style.left = newX + 'px';
-            el.style.top = newY + 'px';
-            el.style.right = 'auto';
-        });
-        
-        document.addEventListener('mouseup', () => {
-            dragging = false;
-            el.style.transition = 'all 0.3s ease';
-        });
-    }
-
-    // ==========================================
-    // 4. 动画效果
-    // ==========================================
-    function animateRingStart(color) {
-        const ring = document.getElementById('zh-status-ring');
-        if (ring) {
-            ring.classList.add('active');
-            ring.style.borderTopColor = color;
-            ring.style.borderRightColor = color;
-            ring.style.borderBottomColor = 'transparent';
-            ring.style.borderLeftColor = 'transparent';
-        }
-    }
-
-    function animateRingStop() {
-        const ring = document.getElementById('zh-status-ring');
-        if (ring) {
-            ring.classList.remove('active');
-        }
-    }
-
-    const UI_STYLE_TEMPLATES = {
-        floatingPanelHeader: (color) => `background: linear-gradient(135deg, ${color}20 0%, ${color}10 100%);`,
-        floatingPanelTitle: (color) => `color: ${color};`,
-        notificationBase: (color) => `
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            background: ${color};
-            color: white;
-            padding: 12px 16px;
-            border-radius: 10px;
-            box-shadow: 0 6px 16px rgba(15, 23, 42, 0.25);
-            z-index: 2147483647;
-            font-size: 14px;
-            font-weight: 600;
-            animation: slideInRight 0.25s ease;
-        `
-    };
-
-    const REMIND_PANEL_STYLE_TEMPLATES = {
-        wrapper: 'text-align:center; padding:20px;',
-        icon: 'font-size:36px; margin-bottom:12px;',
-        title: 'margin:0 0 12px 0;',
-        progressText: 'font-size:14px; color:#666;',
-        barTrack: 'width:200px; height:6px; background:#e0e0e0; border-radius:3px; margin:16px auto; overflow:hidden;',
-        bar: 'width:0%; height:100%; background:#FF6B6B; transition: width 0.3s ease;'
-    };
-
-    const AUTO_GRADE_PANEL_STYLE_TEMPLATES = {
-        wrapper: 'text-align:center; padding:20px;',
-        icon: 'font-size:36px; margin-bottom:12px;',
-        title: 'margin:0 0 12px 0;',
-        progressText: 'font-size:14px; color:#666;',
-        pageFeedback: 'font-size:12px; color:#8a8a8a; margin-top:6px;',
-        barTrack: 'width:200px; height:6px; background:#e0e0e0; border-radius:3px; margin:16px auto; overflow:hidden;',
-        bar: 'width:0%; height:100%; background:#FF6B6B; transition: width 0.3s ease;',
-        progressColorNormal: '#666',
-        progressColorPaused: '#FF9800',
-        pageFeedbackColorPending: '#8a8a8a',
-        pageFeedbackColorOk: '#2f6f3d',
-        pageFeedbackColorWarn: '#b45309'
-    };
-
-    function buildRemindProgressPanelHTML() {
-        return `
-            <div style="${REMIND_PANEL_STYLE_TEMPLATES.wrapper}">
-                <div style="${REMIND_PANEL_STYLE_TEMPLATES.icon}">📢</div>
-                <h3 style="${REMIND_PANEL_STYLE_TEMPLATES.title}">正在批量催交</h3>
-                <p id="zh-remind-progress" style="${REMIND_PANEL_STYLE_TEMPLATES.progressText}">准备开始...</p>
-                <div style="${REMIND_PANEL_STYLE_TEMPLATES.barTrack}">
-                    <div id="zh-remind-bar" style="${REMIND_PANEL_STYLE_TEMPLATES.bar}"></div>
-                </div>
-            </div>
-        `;
-    }
-
-    function buildAutoGradeProgressPanelHTML() {
-        return `
-            <div style="${AUTO_GRADE_PANEL_STYLE_TEMPLATES.wrapper}">
-                <div style="${AUTO_GRADE_PANEL_STYLE_TEMPLATES.icon}">⏳</div>
-                <h3 style="${AUTO_GRADE_PANEL_STYLE_TEMPLATES.title}">自动批改中</h3>
-                <p id="zh-auto-grade-progress" style="${AUTO_GRADE_PANEL_STYLE_TEMPLATES.progressText}">准备开始...</p>
-                <p id="zh-page-feedback" style="${AUTO_GRADE_PANEL_STYLE_TEMPLATES.pageFeedback}">分页反馈：待开始</p>
-                <div style="${AUTO_GRADE_PANEL_STYLE_TEMPLATES.barTrack}">
-                    <div id="zh-auto-grade-bar" style="${AUTO_GRADE_PANEL_STYLE_TEMPLATES.bar}"></div>
-                </div>
-            </div>
-        `;
-    }
-
-    function updatePageFeedback(text, type = 'pending') {
-        const pageFeedbackEl = document.getElementById('zh-page-feedback');
-        if (!pageFeedbackEl) return;
-
-        pageFeedbackEl.textContent = text;
-        if (type === 'ok') {
-            pageFeedbackEl.style.color = AUTO_GRADE_PANEL_STYLE_TEMPLATES.pageFeedbackColorOk;
-        } else if (type === 'warn') {
-            pageFeedbackEl.style.color = AUTO_GRADE_PANEL_STYLE_TEMPLATES.pageFeedbackColorWarn;
-        } else {
-            pageFeedbackEl.style.color = AUTO_GRADE_PANEL_STYLE_TEMPLATES.pageFeedbackColorPending;
-        }
-    }
-
-    // ==========================================
-    // 5. 浮动面板
-    // ==========================================
-    function showFloatingPanel(title, color, contentHTML) {
-        closePanelIfExists();
-        
-        const panel = document.createElement('div');
-        panel.id = 'zh-floating-panel';
-        panel.className = 'zh-floating-panel';
-        panel.style.backgroundColor = '#fff';
-
-        panel.innerHTML = `
-            <div class="zh-panel-header" style="${UI_STYLE_TEMPLATES.floatingPanelHeader(color)}">
-                <h3 style="${UI_STYLE_TEMPLATES.floatingPanelTitle(color)}">🎯 ${title}</h3>
-                <button class="zh-panel-close" id="zh-panel-close-btn">✕</button>
-            </div>
-            <div id="zh-panel-body" class="zh-panel-body">${contentHTML}</div>
-        `;
-
-        document.body.appendChild(panel);
-        
-        // 添加关闭按钮事件监听器
-        const closeBtn = panel.querySelector('#zh-panel-close-btn');
-        if (closeBtn) {
-            closeBtn.addEventListener('click', () => {
-                panel.remove();
-            });
-        }
-        
-        makeDraggable(panel.querySelector('.zh-panel-header'));
-    }
-
-    function closePanelIfExists() {
-        const existing = document.getElementById('zh-floating-panel');
-        if (existing) existing.remove();
-    }
-
-    function updatePanelBody(html) {
-        const body = document.getElementById('zh-panel-body');
-        if (body) body.innerHTML = html;
-    }
-
-    // 显示通知提示
-    function showNotification(message, color) {
-        const notification = document.createElement('div');
-        notification.style.cssText = UI_STYLE_TEMPLATES.notificationBase(color);
-        notification.textContent = message;
-        document.body.appendChild(notification);
-
-        setTimeout(() => {
-            notification.style.animation = 'slideOutRight 0.25s ease';
-            setTimeout(() => notification.remove(), 260);
-        }, 2000);
-    }
+    // 注意：样式注入、浮窗球创建、UI辅助函数等已迁移到 content-floating-ball.js
+    // 包括：injectStyles, createFloatingBall, makeDraggable, animateRingStart, animateRingStop,
+    // showFloatingPanel, updatePanelBody, buildRemindProgressPanelHTML, buildAutoGradeProgressPanelHTML, updatePageFeedback
 
     // ==========================================
     // 6. 学生列表自动导航和自动批改
     // ==========================================
-    
-    // 检测并提取学生列表信息（支持分页）
-    async function detectStudentList() {
-        appLogger.info('🔍 [自动批改] 开始检测学生列表...');
-        
-        const allStudents = [];
-
-        // 先回到第一页，避免从中间页开始扫描
-        await goToPage(1);
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        
-        // 1. 先获取总学生数
-        const totalCount = getTotalStudentCount();
-        appLogger.debug(`📊 [自动批改] 总学生数: ${totalCount}`);
-        
-        // 2. 检测总页数
-        const totalPages = getTotalPages();
-        appLogger.debug(`📄 [自动批改] 总页数: ${totalPages}`);
-        
-        // 3. 遍历每一页
-        for (let page = 1; page <= totalPages; page++) {
-            appLogger.debug(`\n📖 [自动批改] 正在扫描第 ${page} 页...`);
-            
-            // 如果不是第一页，需要点击翻页
-            if (page > 1) {
-                await goToPage(page);
-                await new Promise(resolve => setTimeout(resolve, 1500)); // 等待页面加载
-            }
-            
-            // 提取当前页的学生
-            const studentsOnPage = extractStudentsFromCurrentPage();
-            allStudents.push(...studentsOnPage);
-            
-            appLogger.debug(`✅ [自动批改] 第 ${page} 页找到 ${studentsOnPage.length} 个学生`);
-        }
-        
-        appLogger.info(`\n🎉 [自动批改] 扫描完成！共找到 ${allStudents.length} 个学生`);
-
-        // 扫描完成后回到第一页，保持初始状态
-        await goToPage(1);
-        await new Promise(resolve => setTimeout(resolve, 1500));
-
-        return allStudents;
-    }
-
-    // 获取学生总数
-    function getTotalStudentCount() {
-        // 从 "全部(36)" 中提取数字
-        const allText = document.body.textContent;
-        const match = allText.match(/全部[（(](\d+)[）)]/);
-        if (match) {
-            return parseInt(match[1]);
-        }
-        
-        // 备选：从 "共 36 条" 提取
-        const match2 = allText.match(/共\s*(\d+)\s*条/);
-        if (match2) {
-            return parseInt(match2[1]);
-        }
-        
-        return 0;
-    }
-    
-    // 获取总页数
-    function getTotalPages() {
-        const pagers = document.querySelectorAll('.el-pager .number');
-        if (pagers.length > 0) {
-            // 找到最大页码
-            let maxPage = 1;
-            for (let pager of pagers) {
-                const pageNum = parseInt(pager.textContent.trim());
-                if (pageNum > maxPage) {
-                    maxPage = pageNum;
-                }
-            }
-            return maxPage;
-        }
-        return 1; // 默认至少1页
-    }
-    
-    // 跳转到指定页
-    function goToPage(pageNum) {
-        return new Promise((resolve) => {
-            appLogger.debug(`🔄 [自动批改] 跳转到第 ${pageNum} 页...`);
-            updatePageFeedback(`分页反馈：正在跳转到第 ${pageNum} 页...`, 'pending');
-            
-            // 方式 1: 点击页码按钮
-            const pagers = document.querySelectorAll('.el-pager .number');
-            for (let pager of pagers) {
-                if (pager.textContent.trim() === pageNum.toString()) {
-                    pager.click();
-                    appLogger.debug(`✅ [自动批改] 已点击第 ${pageNum} 页`);
-                    updatePageFeedback(`分页反馈：已切换到第 ${pageNum} 页`, 'ok');
-                    setTimeout(() => resolve(), 1000);
-                    return;
-                }
-            }
-            
-            // 方式 2: 点击"下一页"按钮
-            const nextBtn = document.querySelector('.btn-next');
-            if (nextBtn && !nextBtn.disabled) {
-                nextBtn.click();
-                appLogger.debug(`✅ [自动批改] 已点击"下一页"`);
-                updatePageFeedback('分页反馈：已点击下一页', 'ok');
-                setTimeout(() => resolve(), 1000);
-                return;
-            }
-            
-            // 方式 3: 输入页码跳转
-            const pageInput = document.querySelector('.el-pagination__editor input');
-            if (pageInput) {
-                pageInput.value = pageNum;
-                pageInput.dispatchEvent(new Event('input', { bubbles: true }));
-                pageInput.dispatchEvent(new Event('change', { bubbles: true }));
-                pageInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-                appLogger.debug(`✅ [自动批改] 已输入页码 ${pageNum}`);
-                updatePageFeedback(`分页反馈：已输入页码 ${pageNum}`, 'ok');
-                setTimeout(() => resolve(), 1000);
-                return;
-            }
-            
-            appLogger.warn(`⚠️ [自动批改] 无法跳转到第 ${pageNum} 页`);
-            updatePageFeedback(`分页反馈：无法跳转到第 ${pageNum} 页`, 'warn');
-            resolve();
-        });
-    }
-    
-    // 从当前页面提取学生信息
-    function extractStudentsFromCurrentPage() {
-        const studentList = [];
-        
-        // 尝试多个选择器来找到学生行
-        let rows = document.querySelectorAll('tbody tr.el-table__row');
-        
-        if (rows.length === 0) {
-            rows = document.querySelectorAll('table tbody tr');
-        }
-        
-        if (rows.length === 0) {
-            rows = document.querySelectorAll('[class*="el-table__row"]');
-        }
-        
-        if (rows.length === 0) {
-            appLogger.warn('❌ [学生列表提取] 无法找到任何表格行');
-            return studentList;
-        }
-        
-        appLogger.debug(`📋 [学生列表提取] 找到 ${rows.length} 行数据`);
-        
-        rows.forEach((row, index) => {
-            try {
-                const tds = row.querySelectorAll('td');
-                
-                if (tds.length < 4) {
-                    appLogger.warn(`⚠️ [学生列表提取] 第 ${index} 行列数不足 (${tds.length})`);
-                    return;
-                }
-                
-                // Polymas 平台布局 - 列索引
-                // [0]: 勾选框
-                // [1]: 姓名 (el-table_1_column_2)
-                // [2]: 学号 (el-table_1_column_3)
-                // [3]: 完成时间 (el-table_1_column_4)
-                // [4]: 批阅状态 (el-table_1_column_5)
-                // [5]: 成绩 (el-table_1_column_6)
-                // [6]: 发布状态 (el-table_1_column_7)
-                // [7]: 操作 (el-table_1_column_8)
-                
-                // 1. 提取学生名字（第2列）
-                let studentName = '';
-                const nameCell = tds[1];
-                if (nameCell) {
-                    // 从 student-info-box 中提取文本
-                    const nameEl = nameCell.querySelector('[data-v-3980a020]');
-                    if (nameEl) {
-                        studentName = nameEl.textContent.trim();
-                    }
-                    // 降级方案
-                    if (!studentName) {
-                        studentName = nameCell.innerText?.trim() || nameCell.textContent?.trim() || '';
-                    }
-                }
-                
-                if (!studentName || studentName.length === 0) {
-                    appLogger.warn(`⚠️ [学生列表提取] 第 ${index} 行无法提取名字，跳过`);
-                    return;
-                }
-                
-                appLogger.debug(`📝 [学生列表提取] [${index}] 名字: ${studentName}`);
-                
-                // 2. 提取学号（第3列）
-                let studentId = tds[2]?.textContent?.trim() || '';
-                
-                // 3. 提取完成时间（第4列）
-                let completionTime = tds[3]?.textContent?.trim() || '';
-                
-                // 4. 提取批阅状态（第5列）
-                let status = tds[4]?.textContent?.trim() || '未知';
-                
-                // 判断是否已提交：不仅要有完成时间，还要状态不包含"未提交"
-                const hasSubmission = (completionTime && completionTime !== '-' && completionTime !== '—' && completionTime !== '<!---->-') 
-                    && !status.includes('未提交');
-                
-                // 5. 获取操作按钮（第8列或最后一列）
-                let actionBtn = null;
-                
-                // 首先尝试第8列（index 7）
-                if (tds[7]) {
-                    const btn = tds[7].querySelector('.base-button-component, .primary, .is-link');
-                    if (btn) {
-                        actionBtn = btn;
-                        appLogger.debug(`✅ [学生列表提取] [${index}] 从第8列找到操作按钮`);
-                    }
-                }
-                
-                // 如果没找到，尝试最后一列
-                if (!actionBtn && tds.length > 0) {
-                    const lastCell = tds[tds.length - 1];
-                    const btn = lastCell.querySelector('div[class*="button"], button, [class*="base-button"]');
-                    if (btn) {
-                        actionBtn = btn;
-                        appLogger.debug(`✅ [学生列表提取] [${index}] 从最后一列找到操作按钮`);
-                    }
-                }
-                
-                // 如果还没找到，遍历所有td寻找按钮
-                if (!actionBtn) {
-                    for (let i = tds.length - 1; i >= Math.max(0, tds.length - 3); i--) {
-                        const btn = tds[i].querySelector('[class*="button"], [class*="base"], button');
-                        if (btn && btn.textContent.includes('批阅') || btn.textContent.includes('催交')) {
-                            actionBtn = btn;
-                            appLogger.debug(`✅ [学生列表提取] [${index}] 从第${i}列找到操作按钮`);
-                            break;
-                        }
-                    }
-                }
-                
-                if (!actionBtn) {
-                    appLogger.warn(`⚠️ [学生列表提取] 第 ${index} 行 (${studentName}) 无法找到操作按钮，跳过`);
-                    appLogger.debug(`   行HTML: ${row.innerHTML.substring(0, 200)}...`);
-                    return;
-                }
-                
-                // ============ 关键：未提交的学生直接跳过，不添加到列表 ============
-                if (!hasSubmission) {
-                    appLogger.debug(`⏭️ [学生列表提取] [${index}] ${studentName} (${studentId}) - 状态: ${status}，未提交，跳过`);
-                    return;
-                }
-                
-                appLogger.debug(`✅ [学生列表提取] [${index}] ${studentName} (${studentId}) - 状态: ${status}`);
-                
-                studentList.push({
-                    name: studentName,
-                    studentId: studentId || 'N/A',
-                    completionTime: completionTime || 'N/A',
-                    status: status,
-                    hasSubmission: hasSubmission,
-                    actionBtn: actionBtn,
-                    row: row
-                });
-                
-            } catch (error) {
-                appLogger.warn(`⚠️ [学生列表提取] 第 ${index} 行处理出错:`, error.message);
-            }
-        });
-        
-        appLogger.debug(`📊 [学生列表提取] 成功提取 ${studentList.length}/${rows.length} 个学生`);
-        return studentList;
-    }
+    // 注意：学生列表检测提取相关函数已迁移到 content-parser.js
+    // 包括：detectStudentList, getTotalStudentCount, getTotalPages, extractStudentsFromCurrentPage 等
     
     // 自动点击学生进入批改界面
-    function clickStudentToEnter(student) {
-        return new Promise((resolve) => {
-            appLogger.debug(`🖱️ [自动批改] 点击学生: ${student.name}`);
-            
-            try {
-                // 先关闭可能存在的弹窗
-                autoCloseIntrruptDialogs();
-                
-                // 高亮显示要点击的学生
-                student.row.style.backgroundColor = '#FFF59D';
-                
-                // 滚动到元素可见位置
-                student.row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                
-                // 等待滚动完成后点击
-                setTimeout(() => {
-                    appLogger.debug(`🖱️ [自动批改] 真正点击 ${student.name} 的操作按钮`);
-                    student.actionBtn.click();
-                    
-                    // 等待页面加载完毕（3秒保证页面完全加载）
-                    setTimeout(() => {
-                        // 页面加载后再次检查弹窗
-                        autoCloseIntrruptDialogs();
-                        
-                        appLogger.debug(`✅ [自动批改] ${student.name} 的作答界面已加载`);
-                        resolve();
-                    }, 3000);
-                }, 300);
-            } catch (error) {
-                appLogger.error(`❌ [自动批改] 点击学生 ${student.name} 失败:`, error);
-                setTimeout(() => resolve(), 2000);
-            }
-        });
-    }
-    
-    // 检测评分输入框
-    function findScoreInput() {
-        appLogger.debug('🔍 [自动批改] 查找评分输入框...');
-        
-        // ============ 方案1：查找包含"请输入成绩"或"成绩"的input ============
-        let inputs = document.querySelectorAll('input[placeholder*="成绩"], input[placeholder*="分数"]');
-        if (inputs.length > 0) {
-            appLogger.debug('✅ [自动批改] 通过placeholder找到评分输入框');
-            return inputs[0];
-        }
-        
-        // ============ 方案2：查找 el-input__inner 类的input（Element UI风格） ============
-        inputs = document.querySelectorAll('input.el-input__inner[type="text"]');
-        if (inputs.length > 0) {
-            // 过滤掉搜索框等其他input
-            for (let input of inputs) {
-                const placeholder = input.getAttribute('placeholder') || '';
-                if (placeholder.includes('成绩') || placeholder.includes('分') || placeholder.includes('输入')) {
-                    appLogger.debug('✅ [自动批改] 通过el-input__inner找到评分输入框');
-                    return input;
-                }
-            }
-            // 如果没有合适的placeholder，取第一个
-            appLogger.debug('✅ [自动批改] 找到el-input__inner，假设为评分框');
-            return inputs[0];
-        }
-        
-        // ============ 方案3：通过"本题得分"标签定位 ============
-        const labels = document.querySelectorAll('p, span, label');
-        for (let label of labels) {
-            const text = (label.textContent || '').trim();
-            if (text.includes('本题得分') || text.includes('得分')) {
-                // 向下查找最近的input
-                let parent = label.closest('.el-input, .el-form-item, [class*="score"]');
-                if (!parent) {
-                    // 向上查找父容器，然后在其中查找input
-                    parent = label.closest('div');
-                    let counter = 0;
-                    while (parent && counter < 5) {
-                        const input = parent.querySelector('input[type="text"]');
-                        if (input) {
-                            appLogger.debug('✅ [自动批改] 通过标签定位找到评分输入框');
-                            return input;
-                        }
-                        parent = parent.parentElement;
-                        counter++;
-                    }
-                }
-            }
-        }
-        
-        // ============ 方案4：从所有input中推断（电脑页面通常先是评分，后是评语） ============
-        const allInputs = document.querySelectorAll('input[type="text"]');
-        const allTextareas = document.querySelectorAll('textarea');
-        
-        // 如果只有一个input且有textarea，这个input很可能是评分框
-        if (allInputs.length === 1 && allTextareas.length > 0) {
-            appLogger.debug('✅ [自动批改] 唯一的input推断为评分框');
-            return allInputs[0];
-        }
-        
-        // 如果有多个input，评分框通常在评语textarea之前
-        if (allInputs.length > 0) {
-            // 返回第一个text input（通常是评分）
-            appLogger.debug('✅ [自动批改] 返回第一个input作为评分框');
-            return allInputs[0];
-        }
-        
-        appLogger.warn('⚠️ [自动批改] 未找到评分输入框');
-        return null;
-    }
-    
-    // 检测评语输入框
-    function findCommentInput() {
-        appLogger.debug('🔍 [自动批改] 查找评语输入框...');
-        
-        // ============ 方案1：查找textarea（最直接） ============
-        let textareas = document.querySelectorAll('textarea.el-textarea__inner');
-        if (textareas.length > 0) {
-            appLogger.debug('✅ [自动批改] 找到评语textarea（el-textarea）');
-            return textareas[0];
-        }
-        
-        // ============ 方案2：查找所有textarea ============
-        textareas = document.querySelectorAll('textarea');
-        if (textareas.length > 0) {
-            // 过滤掉搜索框等其他textarea
-            for (let textarea of textareas) {
-                const placeholder = textarea.getAttribute('placeholder') || '';
-                if (placeholder.includes('评语') || placeholder.includes('备注') || placeholder.includes('老师')) {
-                    appLogger.debug('✅ [自动批改] 通过placeholder找到評語textarea');
-                    return textarea;
-                }
-            }
-            // 如果没有合适的placeholder，返回第一个
-            appLogger.debug('✅ [自动批改] 返回第一个textarea作为评语框');
-            return textareas[0];
-        }
-        
-        // ============ 方案3：查找 contenteditable 元素 ============
-        let editables = document.querySelectorAll('[contenteditable="true"]');
-        if (editables.length > 0) {
-            appLogger.debug('✅ [自动批改] 找到评语contenteditable');
-            return editables[0];
-        }
-        
-        // ============ 方案4：通过"评语"标签定位 ============
-        const labels = document.querySelectorAll('p, span, label, .el-textarea__wrapper');
-        for (let label of labels) {
-            const text = (label.textContent || '').trim();
-            if (text.includes('评语') || text.includes('备注') || text.includes('总评')) {
-                // 向下查找最近的textarea或输入框
-                let parent = label.closest('[class*="textarea"], [class*="comment"], [class*="remark"]');
-                if (!parent) {
-                    parent = label.closest('div');
-                }
-                
-                if (parent) {
-                    let textarea = parent.querySelector('textarea');
-                    if (textarea) {
-                        appLogger.debug('✅ [自动批改] 通过标签定位找到评语textarea');
-                        return textarea;
-                    }
-                    
-                    let editable = parent.querySelector('[contenteditable="true"]');
-                    if (editable) {
-                        appLogger.debug('✅ [自动批改] 通过标签定位找到评语contenteditable');
-                        return editable;
-                    }
-                }
-            }
-        }
-        
-        // ============ 方案5：查找整个批改面板的textarea ============
-        const correctPanel = document.querySelector('.correct-right, [class*="correct"]');
-        if (correctPanel) {
-            let textarea = correctPanel.querySelector('textarea');
-            if (textarea) {
-                appLogger.debug('✅ [自动批改] 从批改面板找到评语textarea');
-                return textarea;
-            }
-        }
-        
-        appLogger.warn('⚠️ [自动批改] 未找到评语输入框');
-        return null;
-    }
-    
-    // 自动填充评分和评语
-    function autoFillGradeAndComment(score, comment) {
-        appLogger.debug(`📝 [自动批改] 开始填充：分数=${score}，评语=${comment}`);
-        
-        // 填充评分
-        const scoreInput = findScoreInput();
-        if (scoreInput) {
-            // 设置value属性（用于可能的Vue绑定）
-            scoreInput.value = String(score);
-            
-            // 触发 input 和 change 事件以让Vue捕获变化
-            scoreInput.dispatchEvent(new Event('input', { bubbles: true }));
-            scoreInput.dispatchEvent(new Event('change', { bubbles: true }));
-            
-            appLogger.debug(`✅ [自动批改] 评分已填充: ${score}`);
-        } else {
-            appLogger.warn('⚠️ [自动批改] 无法位置评分输入框');
-        }
-        
-        // 填充评语
-        if (comment) {
-            const commentInput = findCommentInput();
-            if (commentInput) {
-                commentInput.value = comment;
-                commentInput.textContent = comment;
-                
-                // 触发事件
-                commentInput.dispatchEvent(new Event('input', { bubbles: true }));
-                commentInput.dispatchEvent(new Event('change', { bubbles: true }));
-                commentInput.dispatchEvent(new Event('blur', { bubbles: true }));
-                
-                appLogger.debug(`✅ [自动批改] 评语已填充`);
-            } else {
-                appLogger.warn('⚠️ [自动批改] 无法找到评语输入框');
-            }
-        }
-    }
-
-    // ==========================================
-    // 7.作业类型检测与对应批改策略
-    // ==========================================
-    const HOMEWORK_TYPES = {
-        VOCAB_CHOICE: 'vocab_choice',           // (1) 词汇选择题
-        READING_CHOICE: 'reading_choice',       // (2) 阅读理解选择题
-        READING_SHORT: 'reading_short',         // (3) 阅读理解简答题
-        SENTENCE_REWRITE: 'sentence_rewrite',   // (4) 句子改写
-        SENTENCE_COMBINE: 'sentence_combine',   // (5) 句子合并
-        PARAGRAPH_REWRITE: 'paragraph_rewrite', // (6) 段落改写
-        SHORT_ESSAY: 'short_essay',             // (7) 短文写作
-        TEM4_WRITING: 'tem4_writing',           // (8) 专四写作练习
-        MULTIMODAL: 'multimodal',               // (9) 多模态作品
-        // 兼容旧类型（映射）
-        CHOICE: 'vocab_choice',
-        FILL_BLANK: 'reading_short',
-        ESSAY: 'short_essay'
-    };
-
-    // 各题型默认评分标准配置
     const GRADING_CRITERIA_CONFIG = {
         [HOMEWORK_TYPES.VOCAB_CHOICE]: {
             label: '词汇选择题',
@@ -3099,15 +2377,15 @@ window.addEventListener('unhandledrejection', (e) => {
         
         if (!foundReferenceLabel) {
             for (let pattern of answerPatterns) {
-            const match = allText.match(pattern);
-            if (match && match[1]) {
-                const answer = normalizeAnswerText(match[1].trim());
-                if (isValidAnswerText(answer)) {
-                    appLogger.info(`✅ [自动批改] 提取到标准答案: ${answer}`);
-                    AUTO_GRADING_STATE.standardAnswer = answer;
-                    return answer;
+                const match = allText.match(pattern);
+                if (match && match[1]) {
+                    const answer = normalizeAnswerText(match[1].trim());
+                    if (isValidAnswerText(answer)) {
+                        appLogger.info(`✅ [自动批改] 提取到标准答案: ${answer}`);
+                        AUTO_GRADING_STATE.standardAnswer = answer;
+                        return answer;
+                    }
                 }
-            }
             }
         }
         
@@ -3234,7 +2512,7 @@ window.addEventListener('unhandledrejection', (e) => {
         appLogger.debug('🔍 [自动批改] 直接检查答案容器...');
         
         // 检查 .answer-box 容器
-        const answerBox = document.querySelector('.answer-box');
+        const answerBox = primaryAreas[0];
         if (answerBox) {
             const answerBoxText = (answerBox.textContent || answerBox.innerText || '').trim();
             if (answerBoxText && answerBoxText.length > 10) {
@@ -3248,7 +2526,7 @@ window.addEventListener('unhandledrejection', (e) => {
         }
         
         // 检查 .markdown-latex-container 容器
-        const markdownContainer = document.querySelector('.markdown-latex-container');
+        const markdownContainer = primaryAreas[1];
         if (markdownContainer) {
             const markdownText = (markdownContainer.textContent || markdownContainer.innerText || '').trim();
             if (markdownText && markdownText.length > 10) {
@@ -3259,7 +2537,7 @@ window.addEventListener('unhandledrejection', (e) => {
         }
         
         // 检查 .evaluation-content 容器
-        const evaluationContent = document.querySelector('.evaluation-content');
+        const evaluationContent = primaryAreas[2];
         if (evaluationContent) {
             const evalText = (evaluationContent.textContent || evaluationContent.innerText || '').trim();
             if (evalText && evalText.length > 10) {
@@ -3484,10 +2762,8 @@ window.addEventListener('unhandledrejection', (e) => {
                 
                 if (width < 100 || height < 100) return false;
                 if (src.includes('icon') || src.includes('logo') || src.includes('avatar')) return false;
-                
-                const style = window.getComputedStyle(img);
-                if (style.display === 'none' || style.visibility === 'hidden') return false;
-                
+                if (img.offsetParent === null) return false; // 不可见（避免 getComputedStyle 强制 reflow）
+
                 return true;
             });
             
@@ -3514,15 +2790,15 @@ window.addEventListener('unhandledrejection', (e) => {
             // 调用 background.js 的 OCR 功能 - 添加重试机制
             let response = null;
             let retryCount = 0;
-            const maxRetries = 2;
-            
+            const maxRetries = OCR_MAX_RETRIES;
+
             while (retryCount <= maxRetries) {
                 try {
                     appLogger.debug(`📸 [图片处理] OCR 尝试 ${retryCount + 1}/${maxRetries + 1}...`);
                     response = await new Promise((resolve, reject) => {
                         const timeout = setTimeout(() => {
                             reject(new Error('OCR 请求超时'));
-                        }, 15000); // 15秒超时
+                        }, OCR_TIMEOUT_MS);
                         
                         chrome.runtime.sendMessage(
                             { action: 'performOCR', imageData: imageData },
@@ -3822,8 +3098,7 @@ window.addEventListener('unhandledrejection', (e) => {
             
             // 合并所有文本
             if (allText.length > 0) {
-                const combinedText = allText.join('\\n\\n【第 ' + allText.indexOf(allText[0]) + ' 页开始】\\n\\n')
-                    .split('【第').join('\\n\\n【第'); // 添加分页符
+                const combinedText = allText.map((text, i) => `【第 ${i + 1} 页开始】\n\n${text}`).join('\n\n');
                 appLogger.info(`✅ [多页处理] 完成！共提取 ${allText.length} 页，总长度: ${combinedText.length}`);
                 showNotification(`✅ 文档识别完成（${allText.length} 页）`, '#4CAF50', 2000);
                 return combinedText;
@@ -4089,6 +3364,19 @@ window.addEventListener('unhandledrejection', (e) => {
             // 对于选择题，转换为格式化的答案对比
             let studentAnswerForAI = studentAnswer;
             let standardAnswerForAI = standardAnswer;
+
+            // 页面无标准答案时，使用手动设置中的固定答案/范文作为参考
+            if (!standardAnswerForAI) {
+                const manualReferenceAnswer = String(conditions.referenceAnswer || '').trim();
+                if (manualReferenceAnswer) {
+                    if (conditions.referenceAnswerType === 'model_essay') {
+                        standardAnswerForAI = `参考范文：\n${manualReferenceAnswer}`;
+                    } else {
+                        standardAnswerForAI = `参考答案：${manualReferenceAnswer}`;
+                    }
+                    appLogger.info('🧩 [评语生成] 已使用手动设置的答案部分作为AI参考');
+                }
+            }
             
             if (conditions.homeworkType === '选择题' || conditions.homeworkType === HOMEWORK_TYPES.CHOICE) {
                 // 解析答案对象，转换为易读格式
@@ -4302,7 +3590,6 @@ window.addEventListener('unhandledrejection', (e) => {
                 }
 
                 // 9. 修改后参考答案
-                // 5. 修改后参考答案
                 if (response.revisedAnswer) {
                     comment += '📝 修改后参考答案：\n';
                     comment += response.revisedAnswer + '\n\n';
@@ -4367,12 +3654,12 @@ window.addEventListener('unhandledrejection', (e) => {
             }
 
 
-                        appLogger.debug('✅ [评语生成] 最终评语长度:', comment.length);
+            appLogger.debug('✅ [评语生成] 最终评语长度:', comment.length);
             return comment;
             
         } catch (error) {
             console.error('❌ [评语生成] AI批改失败:', error);
-                        appLogger.warn('⚠️ [评语生成] 回退到简单评语生成');
+            appLogger.warn('⚠️ [评语生成] 回退到简单评语生成');
             
             // 回退到简单评语生成
             let comment = '';
@@ -4972,8 +4259,17 @@ window.addEventListener('unhandledrejection', (e) => {
                 await new Promise(resolve => setTimeout(resolve, 5000)); // 增加到5秒，确保所有文档和附件加载完成
                 
                 // 3. 提取答案
-                const standardAnswer = extractStandardAnswer();
+                let standardAnswer = extractStandardAnswer();
                 let studentAnswer = extractStudentAnswer();
+
+                // 页面无标准答案时，兜底使用手动设置中的固定答案/范文
+                if (!standardAnswer && AUTO_GRADING_STATE.autoGradingConditions?.isSet) {
+                    const manualReferenceAnswer = String(AUTO_GRADING_STATE.autoGradingConditions.referenceAnswer || '').trim();
+                    if (manualReferenceAnswer) {
+                        standardAnswer = manualReferenceAnswer;
+                        appLogger.info('🧩 [自动批改] 已使用手动设置的参考答案/范文作为标准答案');
+                    }
+                }
                 
                 // ============ 处理附件情况 ============
                 if (studentAnswer && studentAnswer.startsWith('[[') && studentAnswer.endsWith(']]')) {
@@ -5344,6 +4640,8 @@ window.addEventListener('unhandledrejection', (e) => {
                 ? currentState.gradingCriteria 
                 : ['', '', ''],  // 默认3个空白标准
             gradingAdvice: currentState.isSet ? currentState.gradingAdvice : '',
+            referenceAnswerType: currentState.isSet ? (currentState.referenceAnswerType || '') : '',
+            referenceAnswer: currentState.isSet ? (currentState.referenceAnswer || '') : '',
             commonMistakes: currentState.isSet && currentState.commonMistakes.length > 0
                 ? currentState.commonMistakes
                 : ['', '']  // 默认2个空白错误
@@ -5353,20 +4651,1440 @@ window.addEventListener('unhandledrejection', (e) => {
         showAnalysisPanel(manualTemplate, true);
         showNotification('✏️ 请设置评分标准', '#2b2b2b');
     }
+
+    // 暴露到全局作用域，供 content-floating-ball.js 调用
+    window.openManualCriteriaEditor = openManualCriteriaEditor;
+    
+    // 获取所有附件的真实下载URL（支持自动点击预览提取）
+    async function extractAttachmentUrls() {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        // 先从共享存储拉取一次，补偿 postMessage 丢失场景
+        await pullSharedPreviewResultsFromStorage('提取开始');
+
+        const normalizeUrl = (raw) => {
+            if (!raw || typeof raw !== 'string') return null;
+            const trimmed = raw.trim();
+            if (!trimmed) return null;
+            if (trimmed.startsWith('//')) return `${window.location.protocol}${trimmed}`;
+            if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
+            if (trimmed.startsWith('/')) return `${window.location.origin}${trimmed}`;
+            return null;
+        };
+
+        const getExpectedExtFromFileName = (name) => {
+            return (String(name || '').trim().toLowerCase().match(/\.(docx|doc|xlsx|xls|pptx|ppt|pdf|txt|zip)$/) || [])[0] || '';
+        };
+
+        const isImageLikeUrl = (url) => {
+            const lower = String(url || '').toLowerCase();
+            const pure = lower.split('?')[0].split('#')[0];
+            return ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico'].some(ext => pure.endsWith(ext));
+        };
+
+        const decodeBase64Param = (value) => {
+            try {
+                const raw = decodeURIComponent(String(value || '').trim());
+                if (!raw) return '';
+                const padded = raw + '='.repeat((4 - raw.length % 4) % 4);
+                return atob(padded);
+            } catch (_) {
+                return '';
+            }
+        };
+
+        // 🔍 从 preview/onlinePreview/getCorsFile 链接中提取真实下载URL
+        const extractRealUrlFromPreview = (previewUrl) => {
+            if (!previewUrl || !/^https?:\/\//i.test(previewUrl)) {
+                return previewUrl;
+            }
+
+            try {
+                let current = previewUrl;
+                for (let depth = 0; depth < 3; depth++) {
+                    const url = new URL(current);
+                    const lower = current.toLowerCase();
+
+                    const isPreviewLike = lower.includes('/resource/preview') || lower.includes('/resource/onlinepreview') || lower.includes('/resource/getcorsfile');
+                    if (!isPreviewLike) break;
+
+                    const encoded = url.searchParams.get('u') || url.searchParams.get('urlPath');
+                    if (!encoded) break;
+
+                    const decoded = decodeBase64Param(encoded);
+                    if (!decoded) break;
+
+                    appLogger.info(`🔓 [URL解码] 第${depth + 1}层解码成功:`);
+                    appLogger.info(`   原链接: ${current.substring(0, 90)}...`);
+                    appLogger.info(`   解码后: ${decoded.substring(0, 120)}`);
+
+                    if (/^https?:\/\//i.test(decoded)) {
+                        current = decoded;
+                    } else {
+                        break;
+                    }
+                }
+
+                // 清理拼接在真实URL后的文件名参数
+                if (current.includes('&n=')) {
+                    current = current.split('&n=')[0];
+                }
+
+                return current;
+            } catch (error) {
+                appLogger.warn(`⚠️ [URL解码] 解码失败: ${error.message}`);
+                return previewUrl;
+            }
+        };
+
+        const isUsefulFileUrl = (url) => {
+            if (!url) return false;
+            const lower = url.toLowerCase();
+
+            // 🚫 先排除明显图片，避免被“受信任域名”误放行。
+            if (isImageLikeUrl(url)) {
+                return false;
+            }
+
+            // 🎯 特别接受 polymas/云预览链接（后续会解码为真实URL）
+            if ((lower.includes('/resource/preview') || lower.includes('/resource/onlinepreview') || lower.includes('/resource/getcorsfile')) && (lower.includes('u=') || lower.includes('urlpath='))) {
+                return true;
+            }
+
+            // 🚫 严格排除明显的非文件资源
+            const excludedPatterns = [
+                '.js', '.css', '.map', '.json', '.xml', '.html',
+                '.woff', '.woff2', '.ttf', '.eot',
+                'google.cn',  // Google
+                'baidu.com',  // Baidu统计
+                'zhihuishu.com/able-commons',  // jQuery等库
+            ];
+            
+            if (excludedPatterns.some(p => lower.includes(p))) {
+                return false;
+            }
+
+            // 明确的附件文件类型（白名单）
+            const documentExtensions = ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf', '.txt', '.zip', '.rar', '.7z'];
+            const hasDocumentExt = documentExtensions.some(ext => lower.includes(ext));
+            
+            // ✅ 如果有文档扩展名，直接放行
+            if (hasDocumentExt) {
+                return true;
+            }
+
+            // 🎯 受信任域名：file.zhihuishu.com 或 aliyuncs.com 的URL基本都接受（作为可能的下载链接）
+            try {
+                const parsed = new URL(url);
+                const host = parsed.hostname.toLowerCase();
+                
+                // ✅ 这些域名下的URL可能是下载/预览链接
+                const isTrustedDomain = [
+                    'file.zhihuishu.com',
+                    'aliyuncs.com',
+                    'polymas.com'
+                ].some(domain => host.includes(domain));
+                
+                if (isTrustedDomain) {
+                    // ✅ polymas和aliyuncs的URL一般是安全的（即使是图片，后续会过滤）
+                    return true;
+                }
+            } catch (_) {
+                // 非标准URL继续走关键字判断
+            }
+
+            // 🚫 排除看起来像是资源文件的URL
+            if (lower.includes('/avatar/') || lower.includes('/icon/') || lower.includes('/user/weixin/')) {
+                return false;
+            }
+
+            // 没有文档扩展名和受信任域名，通过关键字判断
+            const positive = ['download', 'attachment', 'preview', 'file'];
+            const negative = ['icon', 'logo', 'avatar'];
+            
+            const hasPositive = positive.some(k => lower.includes(k));
+            const hasNegative = negative.some(k => lower.includes(k));
+            
+            return hasPositive && !hasNegative;
+        };
+
+        const collectCandidateUrls = (root = document) => {
+            const selectors = [
+                'a[href]',
+                '[data-url]',
+                '[data-file-url]',
+                '[data-download-url]',
+                '[src]',
+                'iframe[src]'
+            ];
+            const candidates = new Set();
+            const allRawUrls = [];  // 🔍 调试：保存所有找到的URL
+
+            selectors.forEach((selector) => {
+                root.querySelectorAll(selector).forEach((el) => {
+                    const rawValues = [
+                        el.getAttribute('href'),
+                        el.getAttribute('data-url'),
+                        el.getAttribute('data-file-url'),
+                        el.getAttribute('data-download-url'),
+                        el.getAttribute('src')
+                    ];
+                    rawValues.forEach((raw) => {
+                        if (raw) {
+                            allRawUrls.push(raw);  // 🔍 保存原始URL
+                        }
+                        let url = normalizeUrl(raw);
+                        
+                        // 🔓 如果是预览链接，提取真实下载URL
+                        if (url && url.includes('polymas.com/resource/preview')) {
+                            url = extractRealUrlFromPreview(url);
+                        }
+                        
+                        if (isUsefulFileUrl(url)) candidates.add(url);
+                    });
+                });
+            });
+
+            // 添加从window.open拦截到的URL
+            if (window._zhsInterceptedPreviewUrls && window._zhsInterceptedPreviewUrls.length > 0) {
+                appLogger.info(`📎 [URL提取] 从window.open拦截中添加 ${window._zhsInterceptedPreviewUrls.length} 个preview URL`);
+                window._zhsInterceptedPreviewUrls.forEach(item => {
+                    if (item.decodedUrl) {
+                        allRawUrls.push(item.decodedUrl);
+                        const normalized = normalizeUrl(item.decodedUrl);
+                        if (normalized && isUsefulFileUrl(normalized)) {
+                            candidates.add(normalized);
+                            appLogger.debug(`  ✅ 添加解码URL: ${item.decodedUrl.substring(0, 80)}`);
+                        }
+                    }
+                    if (item.previewUrl) {
+                        allRawUrls.push(item.previewUrl);
+                        let url = normalizeUrl(item.previewUrl);
+                        if (url && url.includes('polymas.com/resource/preview')) {
+                            url = extractRealUrlFromPreview(url);
+                        }
+                        if (url && isUsefulFileUrl(url)) {
+                            candidates.add(url);
+                            appLogger.debug(`  ✅ 添加preview URL: ${item.previewUrl.substring(0, 80)}`);
+                        }
+                    }
+                });
+            }
+
+            // 添加从 Performance 资源轨迹中捕获的 URL（用于无跳转/无弹窗的静默预览）
+            try {
+                const perfEntries = (performance && typeof performance.getEntriesByType === 'function')
+                    ? performance.getEntriesByType('resource')
+                    : [];
+                if (perfEntries && perfEntries.length > 0) {
+                    let perfHitCount = 0;
+                    const recentEntries = perfEntries.slice(-500);
+                    recentEntries.forEach((entry) => {
+                        const raw = entry?.name;
+                        if (!raw || typeof raw !== 'string') return;
+                        const lower = raw.toLowerCase();
+                        const isPreviewTrace = lower.includes('/resource/preview') ||
+                            lower.includes('/resource/onlinepreview') ||
+                            lower.includes('/resource/getcorsfile');
+                        const isLikelyFileHost = lower.includes('file.zhihuishu.com') || lower.includes('aliyuncs.com');
+
+                        if (!isPreviewTrace && !isLikelyFileHost) return;
+
+                        allRawUrls.push(raw);
+                        perfHitCount++;
+
+                        let normalized = normalizeUrl(raw);
+                        if (normalized && isPreviewTrace) {
+                            normalized = extractRealUrlFromPreview(normalized);
+                        }
+                        if (normalized && isUsefulFileUrl(normalized)) {
+                            candidates.add(normalized);
+                        }
+                    });
+
+                    if (perfHitCount > 0) {
+                        appLogger.info(`📎 [URL提取] 从Performance轨迹扫描到 ${perfHitCount} 条候选请求`);
+                    }
+                }
+            } catch (perfError) {
+                appLogger.debug(`⚠️ [URL提取] Performance轨迹扫描失败: ${perfError.message}`);
+            }
+
+            // 🔍 调试日志：显示找到的所有URL和过滤结果
+            if (allRawUrls.length > 0) {
+                appLogger.info(`📎 [URL提取] 原始找到 ${allRawUrls.length} 个URL`);
+                allRawUrls.slice(0, 10).forEach((url, i) => {  // 只显示前10个
+                    const useful = isUsefulFileUrl(normalizeUrl(url)) ? '✅' : '❌';
+                    appLogger.info(`  ${useful} ${i + 1}. ${url.substring(0, 80)}`);
+                });
+                if (allRawUrls.length > 10) {
+                    appLogger.info(`  ... 还有 ${allRawUrls.length - 10} 个URL未显示`);
+                }
+            } else {
+                appLogger.info('📎 [URL提取] 页面上没有找到任何URL候选');
+            }
+
+            appLogger.info(`📎 [URL提取] 经过过滤，有 ${candidates.size} 个有效URL`);
+
+            return Array.from(candidates);
+        };
+
+        const pickBestUrl = (urls, fileName = '') => {
+            if (!urls || urls.length === 0) {
+                appLogger.debug(`📎 [URL评分] ${fileName} - 没有候选 URL (输入为${urls === null ? 'null' : 'empty array'})`);
+                return null;
+            }
+            const lowerFileName = String(fileName || '').trim().toLowerCase();
+            const expectedExt = getExpectedExtFromFileName(fileName);
+
+            // 当文件名自带明确扩展名时，优先选择匹配该扩展名的URL
+            // 但对于OSS URL（无扩展名），不强制要求扩展名匹配
+            if (expectedExt) {
+                const expectedMatches = urls.filter((url) => String(url || '').toLowerCase().includes(expectedExt));
+                
+                // 如果有匹配扩展名的URL，优先使用
+                if (expectedMatches.length > 0) {
+                    urls = expectedMatches;
+                } else {
+                    // 检查是否有OSS URL（这些URL通常没有扩展名但是有效的文件链接）
+                    const ossUrls = urls.filter((url) => {
+                        const lower = String(url || '').toLowerCase();
+                        const isPureImage = isImageLikeUrl(url);
+                        return lower.includes('aliyuncs.com') || 
+                               lower.includes('polymas') || 
+                               lower.includes('file.zhihuishu.com')
+                            ? !isPureImage
+                            : false;
+                    });
+                    
+                    if (ossUrls.length > 0) {
+                        appLogger.info(`✅ [URL评分] ${fileName} - 未找到带${expectedExt}后缀的URL，但找到 ${ossUrls.length} 个OSS URL，将尝试使用`);
+                        urls = ossUrls;
+                    } else {
+                        appLogger.warn(`⚠️ [URL评分] ${fileName} - 候选URL均不匹配目标扩展名 ${expectedExt}，且无OSS URL可用`);
+                        return null;
+                    }
+                }
+            }
+
+            // 先过滤掉明显非文档文件（图片、前端资源等）
+            const documentUrls = urls.filter((url) => {
+                const lower = String(url || '').toLowerCase();
+
+                if (expectedExt && isImageLikeUrl(url)) {
+                    return false;
+                }
+                
+                // ✅ 允许明确的文档类型
+                const docExtensions = ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf', '.txt', '.zip', '.rar', '.7z'];
+                if (docExtensions.some(ext => lower.includes(ext))) {
+                    return true;
+                }
+                
+                // 🚫 严格排除前端资源和库
+                if (lower.includes('google.cn') || lower.includes('baidu.com') || 
+                    lower.includes('jquery') || lower.includes('assets/') ||
+                    ['.js', '.css', '.map', '.json', '.xml'].some(ext => lower.endsWith(ext))) {
+                    return false;
+                }
+                
+                // 🚫 严格排除明显的图片/头像
+                if (['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico'].some(ext => lower.endsWith(ext)) ||
+                    lower.includes('/avatar/') || lower.includes('/user/weixin/') || lower.includes('/ablecommons/demo/')) {
+                    return false;
+                }
+                
+                // ✅ 接受 polymas/aliyuncs/file.zhihuishu.com 的URL（可能是预览/下载链接）
+                if (lower.includes('aliyuncs.com') || lower.includes('polymas') || 
+                    lower.includes('file.zhihuishu.com')) {
+                    return true;
+                }
+                
+                // ✅ 其他含有预览/下载关键字的URL
+                if (lower.includes('download') || lower.includes('attachment') || 
+                    lower.includes('preview')) {
+                    return true;
+                }
+                
+                return false;
+            });
+            
+            // 如果过滤后没有文档URL，退回到至少接受polymas URL的版本
+            const candidates = documentUrls.length > 0 ? documentUrls : urls.filter((url) => {
+                const lower = String(url || '').toLowerCase();
+
+                if (expectedExt && isImageLikeUrl(url)) {
+                    return false;
+                }
+                
+                // 🚫 排除明显的垃圾
+                if (lower.includes('google.cn') || lower.includes('baidu.com') || 
+                    lower.includes('jquery') || lower.includes('assets/') ||
+                    ['.js', '.css', '.map', '.json', '.xml', '.html'].some(ext => lower.endsWith(ext))) {
+                    return false;
+                }
+                
+                // ✅ 保留 polymas/aliyuncs/file.zhihuishu.com（即使是图片，后面会评分处理）
+                if (lower.includes('aliyuncs.com') || lower.includes('polymas') || 
+                    lower.includes('file.zhihuishu.com')) {
+                    return true;
+                }
+                
+                return false;
+            });
+            
+            // 🔍 调试日志：显示所有候选URL
+            if (candidates.length > 1) {
+                appLogger.debug(`📎 [URL评分] ${candidates.length} 个候选URL：`);
+                candidates.forEach((url, i) => {
+                    appLogger.debug(`  ${i + 1}. ${url.substring(0, 100)}`);
+                });
+            }
+
+            const scored = candidates.map((url) => {
+                const lower = url.toLowerCase();
+                let score = 0;
+                
+                // 🚀 基础分数：受信任域名的URL（可能是真正的下载/预览链接）
+                if (lower.includes('aliyuncs.com') || lower.includes('polymas') || 
+                    lower.includes('file.zhihuishu.com')) {
+                    score += 15;  // 基础分数：这些域名下的URL值得信任
+                }
+                
+                // 路径关键字评分
+                if (lower.includes('download')) score += 6;
+                if (lower.includes('attachment')) score += 4;
+                if (lower.includes('/file')) score += 3;
+                if (lower.includes('preview')) score += 2;
+                
+                // 🎯 无扩展名URL加分（很可能是动态下载链接）
+                if (!lower.match(/\.\w+$/)) {
+                    score += 8;
+                }
+                
+                // 文件名匹配（高优先级）
+                if (lowerFileName && lower.includes(lowerFileName.replace(/\s+/g, ''))) score += 12;
+
+                // 与目标附件扩展名一致时大幅加分
+                if (expectedExt && lower.includes(expectedExt)) score += 20;
+                
+                // 文件扩展名评分
+                const fileExtensions = {
+                    '.docx': 10,
+                    '.doc': 10,
+                    '.xlsx': 9,
+                    '.xls': 9,
+                    '.pptx': 8,
+                    '.ppt': 8,
+                    '.pdf': 7,
+                    '.txt': 5,
+                    '.zip': 3,
+                    '.js': -15,     // 🚫 严格扣分JS文件
+                    '.css': -15,
+                    '.map': -15,
+                    '.png': -8,     // ⚠️ 图片扣分但不是非常严重（图片仍可能是有效资源）
+                    '.jpg': -8,
+                    '.jpeg': -8,
+                    '.gif': -8,
+                    '.svg': -8,
+                    '.webp': -8,
+                    '.bmp': -8,
+                    '.ico': -8
+                };
+                
+                for (const [ext, points] of Object.entries(fileExtensions)) {
+                    if (lower.endsWith(ext)) {
+                        score += points;
+                        break;
+                    }
+                }
+
+                // 若目标是文档附件，则图片链接直接降为极低优先级，基本不可能被选中。
+                if (expectedExt && isImageLikeUrl(url)) {
+                    score -= 120;
+                }
+                
+                // 🚫 严重扣分：明显是头像或演示图片的路径
+                if (lower.includes('/avatar/') || lower.includes('/user/weixin/') || 
+                    lower.includes('/ablecommons/demo/')) {
+                    score -= 20;
+                }
+                
+                return { url, score };
+            });
+
+            scored.sort((a, b) => b.score - a.score);
+            
+            // 🔍 调试日志：显示评分结果
+            if (scored.length > 1) {
+                appLogger.debug(`📎 [URL评分] 排序后 (Top 3)：`);
+                scored.slice(0, 3).forEach((item, i) => {
+                    const fileName = item.url.split('/').pop();
+                    appLogger.debug(`  ${i + 1}. ${fileName} (分数: ${item.score})`);
+                });
+            }
+            
+            // 🎯 返回最高分的URL（即使分数为负也可能是最好的选择，因为可能是polymas的动态链接）
+            const bestUrl = scored[0]?.url || null;
+            if (bestUrl) {
+                appLogger.debug(`📎 [URL评分] ${fileName} - 选择最高分URL: ${bestUrl.substring(0, 80)}`);
+            }
+            return bestUrl;
+        };
+
+        const closePreviewIfNeeded = async () => {
+            const closeSelectors = [
+                '.el-dialog__close',
+                '.el-drawer__close-btn',
+                '.close',
+                '[class*="close"]',
+                '[aria-label*="关闭"]',
+                '[title*="关闭"]'
+            ];
+
+            for (const selector of closeSelectors) {
+                const btn = document.querySelector(selector);
+                if (btn && btn.offsetParent !== null) {
+                    btn.click();
+                    await sleep(250);
+                    return;
+                }
+            }
+
+            // 回退方案：发送 ESC
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Escape',
+                code: 'Escape',
+                keyCode: 27,
+                bubbles: true,
+                cancelable: true
+            }));
+            await sleep(200);
+        };
+
+        const extractDirectlyFromItem = (item, fileName) => {
+            let candidates = [];
+            
+            // 🔍 尝试从 Vue 实例获取数据
+            if (item.__vue__) {
+                appLogger.info(`🎯 [Vue检测] ${fileName} - 发现 Vue 实例，尝试提取数据...`);
+                const vueData = item.__vue__;
+                
+                // 尝试多种可能的数据路径
+                const possiblePaths = [
+                    vueData.$attrs,
+                    vueData.$props,
+                    vueData.$data,
+                    vueData.fileUrl,
+                    vueData.url,
+                    vueData.downloadUrl,
+                    vueData.previewUrl,
+                    vueData.attachment,
+                    vueData.file
+                ];
+                
+                appLogger.info(`🔍 [Vue数据] ${fileName} - Vue 实例键: ${Object.keys(vueData).slice(0, 20).join(', ')}`);
+                
+                // 🎯 深度搜索Vue实例中的URL
+                const extractUrlsFromObject = (obj, depth = 0) => {
+                    if (depth > 3 || !obj || typeof obj !== 'object') return [];
+                    const urls = [];
+                    for (const key of Object.keys(obj)) {
+                        const value = obj[key];
+                        if (typeof value === 'string' && (
+                            value.startsWith('http') || 
+                            value.startsWith('//') || 
+                            key.toLowerCase().includes('url') ||
+                            key.toLowerCase().includes('file')
+                        )) {
+                            const normalized = normalizeUrl(value);
+                            if (normalized && isUsefulFileUrl(normalized)) {
+                                appLogger.info(`🎯 [Vue提取] 从 ${key} 找到URL: ${normalized.substring(0, 80)}`);
+                                urls.push(normalized);
+                            }
+                        } else if (typeof value === 'object' && value !== null) {
+                            urls.push(...extractUrlsFromObject(value, depth + 1));
+                        }
+                    }
+                    return urls;
+                };
+                
+                const vueUrls = extractUrlsFromObject(vueData);
+                if (vueUrls.length > 0) {
+                    appLogger.info(`✅ [Vue提取] 从Vue实例提取到 ${vueUrls.length} 个URL`);
+                    candidates.push(...vueUrls);
+                }
+            }
+            
+            // 🔍 检查所有 data-* 属性
+            const dataAttrs = {};
+            for (const attr of item.attributes) {
+                if (attr.name.startsWith('data-')) {
+                    dataAttrs[attr.name] = attr.value;
+                    // 尝试提取URL
+                    const normalized = normalizeUrl(attr.value);
+                    if (normalized && isUsefulFileUrl(normalized)) {
+                        appLogger.info(`🎯 [Data属性] 从 ${attr.name} 找到URL: ${normalized.substring(0, 80)}`);
+                        candidates.push(normalized);
+                    }
+                }
+            }
+            if (Object.keys(dataAttrs).length > 0) {
+                appLogger.info(`🔍 [数据属性] ${fileName} - data-* 属性:`, dataAttrs);
+            }
+            
+            const candidateElements = [
+                item,
+                item.querySelector('a[href]'),
+                item.closest('a[href]'),
+                item.querySelector('[data-url]'),
+                item.querySelector('[data-file-url]'),
+                item.querySelector('[data-download-url]'),
+                // 🚫 排除图标src：避免提取 <img class="file-icon" src="...icon.png">
+                item.querySelector('video[src], audio[src], source[src], embed[src]'),
+                // 🚫 避免提取img的icon src，只从其他元素提取src
+                item.querySelector('[src]:not(.file-icon):not([class*="icon"])')
+            ].filter(Boolean);
+
+            candidateElements.forEach((el) => {
+                const rawValues = [
+                    el.getAttribute?.('href'),
+                    el.getAttribute?.('data-url'),
+                    el.getAttribute?.('data-file-url'),
+                    el.getAttribute?.('data-download-url'),
+                    el.getAttribute?.('src')
+                ];
+                rawValues.forEach((raw) => {
+                    let normalized = normalizeUrl(raw);
+                    
+                    // 🔓 如果是预览链接，提取真实下载URL
+                    if (normalized && normalized.includes('polymas.com/resource/preview')) {
+                        normalized = extractRealUrlFromPreview(normalized);
+                    }
+                    
+                    if (isUsefulFileUrl(normalized)) candidates.push(normalized);
+                });
+            });
+            
+            // 🔍 调试日志：显示直接提取的结果
+            if (candidates.length === 0) {
+                appLogger.info(`📎 [直接提取] ${fileName} - 从 DOM 直接提取没有找到有用的 URL`);
+                // 显示这个 item 元素本身的信息
+                appLogger.info(`  元素类型: ${item.tagName}`);
+                appLogger.info(`  元素 class: ${item.className}`);
+                appLogger.info(`  元素内容: ${item.textContent.substring(0, 100)}`);
+            } else {
+                appLogger.info(`✅ [直接提取] ${fileName} - 找到 ${candidates.length} 个候选URL`);
+            }
+
+            return pickBestUrl(candidates, fileName);
+        };
+
+        const extractViaClickPreview = async (item, fileName, index) => {
+            try {
+                // 🎯 优先检查缓存：如果已经有了，就不需要点击跳转新标签页
+                const normalizedCurrentName = normalizePreviewName(fileName);
+                const cachedResult = (window._zhsPreviewFileResults || []).find(result => {
+                    if (!result?.fileName || !result?.fileUrl) return false;
+                    return isLikelySamePreviewName(result.fileName, normalizedCurrentName);
+                });
+                
+                if (cachedResult?.fileUrl) {
+                    appLogger.info(`✅ [缓存命中] ${fileName} - 无需点击，直接使用缓存URL`);
+                    appLogger.info(`   缓存文件名: ${cachedResult.fileName}`);
+                    appLogger.info(`   缓存URL: ${cachedResult.fileUrl.substring(0, 80)}...`);
+                    return cachedResult.fileUrl;
+                }
+                
+                appLogger.info(`🔍 [缓存未命中] ${fileName} - 需要点击提取，当前缓存数: ${(window._zhsPreviewFileResults || []).length}`);
+                
+                const dispatchRealClick = (element) => {
+                    if (!element) return;
+
+                    // 更接近真实用户操作：完整鼠标事件序列
+                    const mouseEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                    for (const type of mouseEvents) {
+                        element.dispatchEvent(new MouseEvent(type, {
+                            bubbles: true,
+                            cancelable: true,
+                            composed: true,
+                            view: window,
+                            button: 0
+                        }));
+                    }
+                };
+
+                const beforeUrl = window.location.href;
+                const beforeCandidates = collectCandidateUrls(document);
+                const interceptedBefore = (window._zhsInterceptedPreviewUrls || []).length;
+                const previewResultsBefore = (window._zhsPreviewFileResults || []).length;
+                appLogger.info(`📎 [自动点击] ${fileName} - 点击前：${beforeCandidates.length} 个 URL 候选`);
+                appLogger.info(`📎 [自动点击] ${fileName} - 点击前已拦截 ${interceptedBefore} 个preview URL`);
+
+                item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                await sleep(250);
+
+                // 🎯 严格在当前 file-item 内定位点击目标，避免误触发到其他附件
+                let clickTarget = null;
+                // normalizedCurrentName 已在函数开头定义
+
+                // 优先级1: 当前 item 内，文本与文件名标准化后完全一致的元素
+                const exactNameElement = Array.from(item.querySelectorAll('.box, .line1, [title], span, div')).find((el) => {
+                    const text = String(el.textContent || '');
+                    return !!text && isLikelySamePreviewName(text, normalizedCurrentName);
+                });
+                if (exactNameElement) {
+                    clickTarget = exactNameElement;
+                    appLogger.info(`📎 [自动点击] ${fileName} - 命中精确文件名元素: <${exactNameElement.tagName}>.${exactNameElement.className}`);
+                }
+
+                // 优先级2: 当前 item 内 link 元素
+                if (!clickTarget) {
+                    const linkElement = item.querySelector('a');
+                    if (linkElement) {
+                        clickTarget = linkElement;
+                        appLogger.info(`📎 [自动点击] ${fileName} - 找到link元素: <a> 标签`);
+                    }
+                }
+
+                // 优先级3: 当前 item 内最常见点击区
+                if (!clickTarget) {
+                    clickTarget = item.querySelector('.box, .line1');
+                    if (clickTarget) {
+                        appLogger.info(`📎 [自动点击] ${fileName} - 使用默认点击区域`);
+                    }
+                }
+
+                // 最后才用 item 本身
+                if (!clickTarget) {
+                    clickTarget = item;
+                    appLogger.info(`📎 [自动点击] ${fileName} - 使用item本身作为点击目标`);
+                }
+
+                // 仅允许当前 item 内部节点，禁止父级/同级节点，避免打开错误附件
+                const clickCandidateChain = [];
+                const addCandidate = (el) => {
+                    if (!el || clickCandidateChain.includes(el)) return;
+                    if (el !== item && !item.contains(el)) return;
+                    clickCandidateChain.push(el);
+                };
+                addCandidate(clickTarget);
+                addCandidate(item.querySelector('.box'));
+                addCandidate(item.querySelector('.line1'));
+                addCandidate(item);
+
+                const logClickSnapshot = (stage, attempt = 0) => {
+                    try {
+                        const visibleDialogs = Array.from(document.querySelectorAll('.el-dialog__wrapper, .el-drawer__wrapper, [role="dialog"], .modal'))
+                            .filter((el) => el && el.offsetParent !== null);
+                        const iframes = document.querySelectorAll('iframe').length;
+                        const previews = (window._zhsPreviewFileResults || []).length;
+                        const intercepted = (window._zhsInterceptedPreviewUrls || []).length;
+                        const activeTag = document.activeElement?.tagName || 'N/A';
+                        const candidateSummary = clickCandidateChain
+                            .map((el) => `<${String(el.tagName || '').toLowerCase()}>.${String(el.className || '').trim()}`)
+                            .slice(0, 4)
+                            .join(' | ');
+
+                        appLogger.debug(`🧭 [点击快照] ${fileName} | ${stage}${attempt ? `#${attempt}` : ''}`, {
+                            index,
+                            urlChanged: window.location.href !== beforeUrl,
+                            visibleDialogs: visibleDialogs.length,
+                            iframes,
+                            previewCacheSize: previews,
+                            interceptedCount: intercepted,
+                            activeElement: activeTag,
+                            candidates: candidateSummary || '(empty)'
+                        });
+                    } catch (e) {
+                        appLogger.debug(`⚠️ [点击快照] 记录失败: ${e.message}`);
+                    }
+                };
+
+                const triggerClickCandidates = (reason) => {
+                    appLogger.info(`🖱️ [自动点击] ${fileName} - 触发候选点击(${reason})，候选数: ${clickCandidateChain.length}`);
+                    for (const candidate of clickCandidateChain) {
+                        if (!candidate) continue;
+                        dispatchRealClick(candidate);
+                        try {
+                            candidate.click();
+                        } catch (e) {
+                            appLogger.info(`⚠️ [自动点击] ${fileName} - 点击候选失败: ${candidate.tagName}.${candidate.className}`);
+                        }
+                    }
+                };
+                
+                // 🎯 使用真实的 .click() 方法而不是 dispatchEvent（浏览器更可能允许导航）
+                appLogger.info(`📎 [自动点击] ${fileName} - 准备点击元素: ${clickTarget.tagName}.${clickTarget.className}`);
+                appLogger.info(`📎 [自动点击] ${fileName} - 元素文本内容: ${clickTarget.textContent.substring(0, 50)}`);
+                logClickSnapshot('首次点击前');
+
+                // 先触发一次真实事件序列，再调用click，提升跳转触发概率
+                triggerClickCandidates('首次');
+                appLogger.info(`📎 [自动点击] ${fileName} - 已调用 .click() 方法`);
+                logClickSnapshot('首次点击后');
+                
+                // 等待Preview页面处理完成（如果前一个文件还在处理）
+                let waitCount = 0;
+                while (window._zhsPreviewProcessing && waitCount < 5) {
+                    await sleep(200);
+                    waitCount++;
+                }
+                if (waitCount > 0) {
+                    appLogger.info(`⏳ [Preview页面] 等待前一个文件处理完成 (${waitCount}次)`);
+                }
+
+                // 等待预览弹层或新内容加载后再抓取链接
+                let captured = null;
+                let noProgressCount = 0;
+                const expectedExt = getExpectedExtFromFileName(fileName);
+                for (let attempt = 1; attempt <= 20; attempt++) {  // 增加到20次，确保足够时间打开Preview
+                    await sleep(500);  // 增加到500ms，总等待时间10秒
+
+                    if ([1, 4, 8, 12, 16].includes(attempt)) {
+                        logClickSnapshot('轮询检测', attempt);
+                    }
+
+                    // 先尝试命中新产生的 preview 缓存（兼容 preview 侧文件名异常）
+                    if (!captured) {
+                        const previewResultsNow = window._zhsPreviewFileResults || [];
+                        if (previewResultsNow.length > previewResultsBefore) {
+                            const newPreviewResults = previewResultsNow.slice(previewResultsBefore);
+                            const exactMatch = newPreviewResults.find((result) => {
+                                if (!result?.fileName) return false;
+                                const normalizedResultName = String(result.fileName || '');
+                                return isLikelySamePreviewName(normalizedResultName, normalizedCurrentName);
+                            });
+
+                            if (exactMatch?.fileUrl) {
+                                appLogger.info(`✅ [Preview通信] 第${attempt}次尝试：命中新缓存(精确匹配)`);
+                                captured = exactMatch.fileUrl;
+                                break;
+                            }
+
+                            const relaxedMatch = newPreviewResults.find((result) => {
+                                const url = String(result?.fileUrl || '').toLowerCase();
+                                if (!url || !/^https?:\/\//i.test(url)) return false;
+                                if (expectedExt && !url.includes(expectedExt)) return false;
+                                return url.includes('file.zhihuishu.com') || url.includes('aliyuncs.com') || url.includes('polymas');
+                            });
+
+                            if (relaxedMatch?.fileUrl) {
+                                appLogger.info(`✅ [Preview通信] 第${attempt}次尝试：命中新缓存(宽松匹配)`);
+                                captured = relaxedMatch.fileUrl;
+                                break;
+                            }
+                        }
+                    }
+
+                    // 前几轮做一次强制补点，减少“首次点击没触发”的概率
+                    if (!captured && [2, 4].includes(attempt)) {
+                        triggerClickCandidates(`强制补点${attempt}`);
+                    }
+
+                    if (!captured && [3, 6, 10, 14].includes(attempt)) {
+                        const noNewIntercepted = (window._zhsInterceptedPreviewUrls || []).length === interceptedBefore;
+                        const noRouteChange = window.location.href === beforeUrl;
+                        const normalizedFileName = normalizePreviewName(fileName);
+                        const hasMatchedPreviewMessage = !!(window._zhsPreviewFileResults || []).find((result) => {
+                            if (!result?.fileName) return false;
+                            return isLikelySamePreviewName(result.fileName, normalizedFileName);
+                        });
+                        if (noNewIntercepted && noRouteChange && !hasMatchedPreviewMessage) {
+                            triggerClickCandidates(`重试${attempt}`);
+                        }
+                    }
+
+                    // 优先检查preview页面通信（最快）
+                    if (!captured && window._zhsPreviewFileResults && window._zhsPreviewFileResults.length > 0) {
+                        const normalizedFileName = normalizePreviewName(fileName);
+                        const matchedResult = window._zhsPreviewFileResults.find(result => {
+                            if (!result.fileName) return false;
+                            return isLikelySamePreviewName(result.fileName, normalizedFileName);
+                        });
+                        
+                        if (matchedResult) {
+                            appLogger.info(`✅ [Preview通信] 第${attempt}次尝试：找到匹配文件 "${matchedResult.fileName}"`);
+                            
+                            // 记录分析结果（如果有）
+                            if (matchedResult.analysis) {
+                                appLogger.info(`📊 [文件分析] 已识别到分析结果:`, {
+                                    title: matchedResult.analysis.title,
+                                    hasQuestions: matchedResult.analysis.structure.hasQuestions,
+                                    questionCount: matchedResult.analysis.questions?.length || 0,
+                                    hasAnswers: matchedResult.analysis.structure.hasAnswers,
+                                    answerCount: matchedResult.analysis.answers?.length || 0
+                                });
+                                
+                                // 在日志中展示部分内容
+                                if (matchedResult.analysis.questions?.length > 0) {
+                                    appLogger.info(`📝 [文件分析] 第1个题目: ${matchedResult.analysis.questions[0].substring(0, 100)}...`);
+                                }
+                                if (matchedResult.analysis.answers?.length > 0) {
+                                    appLogger.info(`✅ [文件分析] 第1个答案: ${matchedResult.analysis.answers[0].substring(0, 100)}...`);
+                                }
+                            }
+                            
+                            captured = matchedResult.fileUrl;
+                            break;
+                        }
+                    }
+
+                    // 检查window.open拦截
+                    if (!captured) {
+                        const interceptedAfter = (window._zhsInterceptedPreviewUrls || []).length;
+                        if (interceptedAfter > interceptedBefore) {
+                            const newIntercepted = window._zhsInterceptedPreviewUrls.slice(interceptedBefore);
+                            for (const item of newIntercepted) {
+                                if (item.decodedUrl) {
+                                    appLogger.info(`✅ [window.open拦截] 第${attempt}次尝试：使用解码URL`);
+                                    captured = item.decodedUrl;
+                                    break;
+                                }
+                            }
+                            if (captured) break;
+                        }
+                    }
+
+                    // 🎯 检测页面是否跳转到预览页面
+                    const currentUrl = window.location.href;
+                    const interceptedNow = (window._zhsInterceptedPreviewUrls || []).length;
+                    const noRouteChangeNow = currentUrl === beforeUrl;
+                    const noInterceptGrowth = interceptedNow === interceptedBefore;
+                    
+                    // 🔍 每次尝试都记录当前 URL（用于诊断）
+                    if (attempt === 1 || currentUrl !== beforeUrl) {
+                        appLogger.info(`🌐 [URL检测] 第${attempt}次：${currentUrl === beforeUrl ? '未跳转' : '已跳转'}`);
+                        if (currentUrl !== beforeUrl) {
+                            appLogger.info(`   原始URL: ${beforeUrl.substring(0, 60)}...`);
+                            appLogger.info(`   当前URL: ${currentUrl.substring(0, 60)}...`);
+                        }
+                    }
+                    
+                    // ✅ 处理页面跳转到预览页面的情况
+                    if (currentUrl !== beforeUrl && currentUrl.includes('polymas.com/resource/preview')) {
+                        appLogger.info(`📍 [URL跳转] 检测到跳转至预览页面: ${currentUrl.substring(0, 80)}...`);
+                        const realUrl = extractRealUrlFromPreview(currentUrl);
+                        if (realUrl && realUrl !== currentUrl) {
+                            captured = realUrl;
+                            appLogger.info(`✅ [附件URL] ${fileName} - 从预览页面提取成功(第${attempt}次尝试)`);
+                            break;
+                        }
+                    }
+
+                    // 🔍 检测是否有预览弹窗打开（而非页面跳转）
+                    // 查找dialog、modal或iframe中的polymas预览URL
+                    const detectPreviewModal = () => {
+                        // 先检查所有iframe的src属性
+                        const allIframes = document.querySelectorAll('iframe');
+                        appLogger.info(`📊 [iframe统计] 页面共有 ${allIframes.length} 个iframe`);
+                        
+                        const previewSelectors = [
+                            '.el-dialog__wrapper iframe[src*="polymas.com"]',
+                            '.el-drawer__wrapper iframe[src*="polymas.com"]',
+                            'iframe[src*="resource/preview"]',
+                            '.modal iframe[src*="polymas.com"]',
+                            '[role="dialog"] iframe[src*="polymas.com"]',
+                            'iframe[src*="polymas"]'  // 广泛匹配
+                        ];
+                        
+                        for (const selector of previewSelectors) {
+                            const preview = document.querySelector(selector);
+                            if (preview && preview.src) {
+                                const previewUrl = normalizeUrl(preview.src);
+                                if (previewUrl && previewUrl.includes('polymas.com')) {
+                                    appLogger.info(`🔍 [弹窗检测] 发现预览iframe: ${previewUrl.substring(0, 80)}`);
+                                    return previewUrl;
+                                }
+                            }
+                        }
+                        
+                        // 扫描所有iframe src
+                        for (const iframe of allIframes) {
+                            if (iframe.src && iframe.src.includes('polymas.com')) {
+                                const previewUrl = normalizeUrl(iframe.src);
+                                if (previewUrl) {
+                                    appLogger.info(`🔍 [弹窗检测] 从iframe扫描发现: ${previewUrl.substring(0, 80)}`);
+                                    return previewUrl;
+                                }
+                            }
+                        }
+                        
+                        // 查找HTML中隐藏的预览URL
+                        const PageHtml = document.documentElement.outerHTML;
+                        const previewUrlMatch = PageHtml.match(/resource\/preview[^"'<>]*u=[^"'<>]+/i);
+                        if (previewUrlMatch) {
+                            const previewUrl = normalizeUrl('https://' + previewUrlMatch[0]);
+                            if (previewUrl) {
+                                appLogger.info(`🔍 [弹窗检测] 从HTML提取预览URL: ${previewUrl.substring(0, 80)}`);
+                                return previewUrl;
+                            }
+                        }
+                        
+                        return null;
+                    };
+                    
+                    const modalPreviewUrl = detectPreviewModal();
+                    if (modalPreviewUrl && attempt <= 5) {
+                        appLogger.info(`📍 [弹窗追踪] 第${attempt}次检测到弹窗预览，尝试提取真实URL...`);
+                        const realUrl = extractRealUrlFromPreview(modalPreviewUrl);
+                        if (realUrl && realUrl !== modalPreviewUrl && realUrl.startsWith('http')) {
+                            captured = realUrl;
+                            appLogger.info(`✅ [附件URL] ${fileName} - 从弹窗预览提取成功(第${attempt}次尝试)`);
+                            appLogger.info(`   解码后URL: ${realUrl.substring(0, 100)}`);
+                            break;
+                        }
+                    }
+
+                    const currentCandidates = collectCandidateUrls(document);
+                    appLogger.info(`📎 [自动点击] ${fileName} - 第${attempt}次尝试：${currentCandidates.length} 个 URL`);
+                    
+                    const newOnes = currentCandidates.filter(url => !beforeCandidates.includes(url));
+                    if (newOnes.length > 0) {
+                        noProgressCount = 0;
+                        appLogger.info(`📎 [自动点击] ${fileName} - 发现 ${newOnes.length} 个新 URL`);
+                        newOnes.forEach((url, i) => {
+                            appLogger.info(`  ${i + 1}. ${url.substring(0, 100)}`);
+                        });
+                        
+                        // ✅ 优先从新出现的URL中选择
+                        captured = pickBestUrl(newOnes, fileName);
+                        if (captured) {
+                            appLogger.info(`✅ [附件URL] ${fileName} - 自动点击提取成功(第${attempt}次尝试，来自新URL)`);
+                            break;
+                        }
+                    } else if (noRouteChangeNow && noInterceptGrowth) {
+                        noProgressCount++;
+                    }
+
+                    // 对非首个附件，若多轮无进展则尽快退出，交给免跳转候选池兜底，避免卡20轮。
+                    if (!captured && index > 0 && attempt >= 8 && noProgressCount >= 4) {
+                        logClickSnapshot('提前退出前', attempt);
+                        appLogger.info(`⏭️ [自动点击] ${fileName} - 连续无进展，提前退出点击循环，转入免跳转兜底`);
+                        break;
+                    }
+                    
+                    // 不再从“原有页面URL池”兜底，避免把附件误识别为PNG图标
+                    if (attempt >= 7 && newOnes.length === 0) {
+                        appLogger.info(`📎 [自动点击] ${fileName} - 第${attempt}次尝试：无新URL，继续等待真实预览跳转/弹窗`);
+                        appLogger.info(`   当前URL总数: ${currentCandidates.length}`);
+                        appLogger.info(`   页面状态: URL${currentUrl === beforeUrl ? '未' : '已'}跳转`);
+                    }
+                }
+
+                // 循环结束后，如果仍未找到，最后再检查一次window.open拦截和preview通信
+                if (!captured) {
+                    // 给Preview页面额外的时间来处理和发送结果
+                    appLogger.info(`⏳ [最终等待] ${fileName} - 循环结束，等待Preview页面最终响应...`);
+                    for (let finalWait = 1; finalWait <= 5; finalWait++) {
+                        await sleep(300);
+                        
+                        // 再次检查preview页面通信
+                        if (window._zhsPreviewFileResults && window._zhsPreviewFileResults.length > 0) {
+                            const normalizedFileName = normalizePreviewName(fileName);
+                            const matchedResult = window._zhsPreviewFileResults.find(result => {
+                                if (!result.fileName) return false;
+                                return isLikelySamePreviewName(result.fileName, normalizedFileName);
+                            });
+                            if (matchedResult) {
+                                captured = matchedResult.fileUrl;
+                                appLogger.info(`✅ [附件URL] ${fileName} - 最终检查时找到匹配文件`);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // 检查window.open拦截
+                    if (!captured) {
+                        const interceptedAfter = (window._zhsInterceptedPreviewUrls || []).length;
+                        if (interceptedAfter > interceptedBefore) {
+                            const newIntercepted = window._zhsInterceptedPreviewUrls.slice(interceptedBefore);
+                            appLogger.info(`📎 [最终检查] 发现 ${newIntercepted.length} 个window.open拦截URL`);
+                            
+                            for (const item of newIntercepted) {
+                                if (item.decodedUrl) {
+                                    captured = item.decodedUrl;
+                                    appLogger.info(`✅ [附件URL] ${fileName} - 从window.open拦截提取成功（最终检查）`);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 最终诊断信息
+                if (!captured && window._zhsPreviewFileResults && window._zhsPreviewFileResults.length > 0) {
+                    appLogger.warn(`⚠️ [Preview通信] 循环结束但未匹配，当前文件名: "${fileName}"`);
+                    appLogger.info(`📎 [Preview通信] 缓存中的文件列表:`);
+                    window._zhsPreviewFileResults.forEach((result, idx) => {
+                        appLogger.info(`  ${idx + 1}. "${result.fileName}" -> ${result.fileUrl?.substring(0, 80)}`);
+                    });
+                }
+
+                // 某些站点会跳详情路由，尝试从地址栏取链接
+                if (!captured && window.location.href !== beforeUrl) {
+                    const currentUrl = window.location.href;
+                    appLogger.info(`🌐 [路由跳转] 页面跳转到新URL: ${currentUrl.substring(0, 100)}`);
+                    
+                    // 🔓 特别处理 polymas 预览链接
+                    if (currentUrl.includes('polymas.com/resource/preview')) {
+                        appLogger.info(`📍 [预览页面] 检测到polymas预览URL，尝试解码真实文件URL...`);
+                        const realUrl = extractRealUrlFromPreview(currentUrl);
+                        if (realUrl && realUrl !== currentUrl && realUrl.startsWith('http')) {
+                            captured = realUrl;
+                            appLogger.info(`✅ [附件URL] ${fileName} - 从polymas预览页面成功解码: ${realUrl.substring(0, 100)}`);
+                        }
+                    } else {
+                        // 其他跳转，尝试从地址栏取链接
+                        const routeUrl = normalizeUrl(currentUrl);
+                        if (isUsefulFileUrl(routeUrl)) {
+                            captured = routeUrl;
+                            appLogger.info(`✅ [附件URL] ${fileName} - 从页面URL提取成功`);
+                        }
+                    }
+                }
+
+                // 🔙 如果页面跳转了，需要返回原页面以处理下一个附件
+                const currentUrl = window.location.href;
+                if (currentUrl !== beforeUrl) {
+                    appLogger.info(`🔙 [页面返回] 从预览页面返回原页面...`);
+                    window.history.back();
+                    await sleep(500);  // 等待页面加载
+                }
+
+                await closePreviewIfNeeded();
+                await sleep(180);
+
+                if (!captured) {
+                    // 🔍 详细诊断日志：为什么没有找到URL？
+                    const afterCandidates = collectCandidateUrls(document);
+                    appLogger.warn(`❌ [附件URL] 自动点击后仍未提取到URL - ${fileName} (索引${index + 1})`);
+                    appLogger.info(`   点击前 URL 数： ${beforeCandidates.length}`);
+                    appLogger.info(`   最后一次尝试 URL 数： 不详（因为 captured 为 null）`);
+                    appLogger.info(`   关闭预览后 URL 数： ${afterCandidates.length}`);
+                    if (afterCandidates.length > 0) {
+                        appLogger.info(`   关闭预览后找到的 URL:`);
+                        afterCandidates.forEach((url, i) => {
+                            appLogger.info(`     ${i + 1}. ${url.substring(0, 100)}`);
+                        });
+                    }
+                }
+
+                return captured;
+            } catch (error) {
+                appLogger.warn(`⚠️ [附件URL] 自动点击提取异常 - ${fileName}: ${error.message}`);
+                return null;
+            }
+        };
+
+        try {
+            // 🎯 优先从题目区（.left-content）提取附件，避免误取学生答案区（.right-content）的文件
+            const leftContent = document.querySelector('.left-content');
+            const searchRoot = leftContent || document;
+            const fileList = searchRoot.querySelector('.file-list');
+            
+            if (!fileList) {
+                appLogger.info('📎 [附件URL提取] 未找到 .file-list 元素');
+                return [];
+            }
+            
+            if (leftContent) {
+                appLogger.info('✅ [附件URL提取] 从 .left-content（题目区）提取附件');
+            } else {
+                appLogger.warn('⚠️ [附件URL提取] 未检测到 .left-content，从全局查找（可能混入学生答案）');
+            }
+
+            // 🔍 尝试从页面全局状态获取附件数据
+            const globalStates = [
+                window.__INITIAL_STATE__,
+                window.__VUE_APP_STATE__,
+                window.appState,
+                window.pageData
+            ];
+            for (const state of globalStates) {
+                if (state) {
+                    appLogger.info(`🌐 [全局状态] 发现全局状态对象:`, Object.keys(state).slice(0, 10));
+                    // 尝试找到附件相关的数据
+                    const stateStr = JSON.stringify(state);
+                    if (stateStr.includes('docx') || stateStr.includes('file') || stateStr.includes('attachment')) {
+                        appLogger.info(`🎯 [全局状态] 可能包含附件信息`);
+                    }
+                }
+            }
+
+            const fileItems = Array.from(fileList.querySelectorAll('.file-item'));
+            const attachmentUrls = [];
+            const usedUrls = new Set();
+            appLogger.info(`📎 [附件URL提取] 发现 ${fileItems.length} 个文件项`);
+
+            const normalizeFileName = (name) => normalizePreviewName(name);
+
+            // 无需跳转的兜底候选池：点击失败时按“未使用URL”分配，避免卡死在单文件成功。
+            const pageFallbackCandidates = collectCandidateUrls(searchRoot).filter((url) => {
+                const lower = String(url || '').toLowerCase();
+                if (isImageLikeUrl(url)) return false;
+                return lower.includes('aliyuncs.com') ||
+                    lower.includes('polymas') ||
+                    lower.includes('file.zhihuishu.com');
+            });
+            if (pageFallbackCandidates.length > 0) {
+                appLogger.info(`📎 [免跳转兜底] 初始化候选池 ${pageFallbackCandidates.length} 个URL`);
+            }
+
+            // 批量预触发：尽量在同一用户手势窗口内把所有附件的preview都触发出来
+            const preTriggerPreviewForAllFiles = async () => {
+                // ⚠️ 已禁用此功能，避免自动点击导致页面跳转
+                appLogger.info('⚠️ [预触发] 此功能已禁用');
+                return;
+                
+                // 以下代码已停用
+                if (fileItems.length <= 1) return;
+                appLogger.info(`🖱️ [预触发] 开始批量预触发 ${fileItems.length} 个附件`);
+
+                const dispatchRealClick = (element) => {
+                    if (!element) return;
+                    const mouseEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                    for (const type of mouseEvents) {
+                        element.dispatchEvent(new MouseEvent(type, {
+                            bubbles: true,
+                            cancelable: true,
+                            composed: true,
+                            view: window,
+                            button: 0
+                        }));
+                    }
+                };
+
+                for (let i = 0; i < fileItems.length; i++) {
+                    const item = fileItems[i];
+                    const name = item.querySelector('.box, .line1')?.textContent?.trim() || `附件_${i + 1}`;
+                    const target = item.querySelector('.box, .line1, .file-item') || item;
+
+                    try {
+                        item.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        dispatchRealClick(target);
+                        target.click();
+                        appLogger.info(`🖱️ [预触发] 已触发: ${name}`);
+                        await sleep(120);
+                    } catch (e) {
+                        appLogger.info(`⚠️ [预触发] 触发失败: ${name} - ${e.message}`);
+                    }
+                }
+
+                await sleep(400);
+                appLogger.info('🖱️ [预触发] 批量预触发完成');
+            };
+
+            // ⚠️ 禁用批量预触发功能，避免自动点击导致页面跳转
+            // await preTriggerPreviewForAllFiles();
+            appLogger.info('⚠️ [预触发] 已禁用批量预触发功能，避免页面跳转');
+
+            for (let i = 0; i < fileItems.length; i++) {
+                const item = fileItems[i];
+                const fileName = item.querySelector('.box, .line1')?.textContent?.trim() || `附件_${i + 1}`;
+
+                let fileUrl = extractDirectlyFromItem(item, fileName);
+                let method = fileUrl ? '直接DOM提取' : null;
+
+                // 优先命中 preview 页面已回传的结果，避免再次点击失败
+                if (!fileUrl && window._zhsPreviewFileResults && window._zhsPreviewFileResults.length > 0) {
+                    const normalizedFileName = normalizeFileName(fileName);
+                    const matchedResult = window._zhsPreviewFileResults.find((result) => {
+                        if (!result?.fileName) return false;
+                        return isLikelySamePreviewName(result.fileName, normalizedFileName);
+                    });
+
+                    if (matchedResult?.fileUrl) {
+                        fileUrl = matchedResult.fileUrl;
+                        method = '预触发缓存命中';
+                        appLogger.info(`✅ [附件URL] ${fileName} - 命中预触发缓存`);
+                    }
+                }
+
+                if (!fileUrl) {
+                    // ⚠️ 不再自动点击附件，避免打开预览页面
+                    appLogger.info(`⚠️ [附件URL] ${fileName} - 未找到URL（已禁用自动点击）`);
+                    // fileUrl = await extractViaClickPreview(item, fileName, i);
+                    method = null;
+                }
+
+                // 若点击链路失败，直接从页面候选池取“未使用URL”兜底，减少对跳转的依赖。
+                if (!fileUrl && pageFallbackCandidates.length > 0) {
+                    const expectedExt = getExpectedExtFromFileName(fileName);
+                    const fallbackCandidates = pageFallbackCandidates
+                        .filter(url => !usedUrls.has(url))
+                        .filter((url) => {
+                            if (!expectedExt) return true;
+                            const lower = String(url || '').toLowerCase();
+                            // 文档场景：允许同扩展名，或无扩展名动态链接；拒绝图片链接。
+                            if (isImageLikeUrl(url)) return false;
+                            const pure = lower.split('?')[0].split('#')[0];
+                            const hasAnyExt = /\.[a-z0-9]{2,5}$/i.test(pure);
+                            return lower.includes(expectedExt) || !hasAnyExt;
+                        });
+                    const fallbackUrl = pickBestUrl(fallbackCandidates, fileName);
+                    if (fallbackUrl) {
+                        fileUrl = fallbackUrl;
+                        method = '页面候选兜底(免跳转)';
+                        appLogger.info(`✅ [附件URL] ${fileName} - 点击失败后启用免跳转兜底成功`);
+                    }
+                }
+
+                // 避免不同附件拿到同一个URL，尝试从全局候选中选未使用的备选
+                if (fileUrl && usedUrls.has(fileUrl)) {
+                    const lowerFileName = String(fileName || '').toLowerCase();
+                    const expectedExt = (lowerFileName.match(/\.(docx|doc|xlsx|xls|pptx|ppt|pdf|txt|zip)$/) || [])[0] || '';
+
+                    const allCandidates = collectCandidateUrls(document)
+                        .filter(url => !usedUrls.has(url))
+                        .filter((url) => {
+                            // 文件名有明确扩展名时，备选URL必须匹配扩展名
+                            if (!expectedExt) return true;
+                            return String(url || '').toLowerCase().includes(expectedExt);
+                        });
+
+                    const fallback = pickBestUrl(allCandidates, fileName);
+                    if (fallback) {
+                        appLogger.info(`🔁 [附件URL] ${fileName} - 检测到重复URL，已切换到备选URL`);
+                        fileUrl = fallback;
+                        method = `${method || '候选提取'}(去重备选)`;
+                    } else {
+                        appLogger.warn(`⚠️ [附件URL] ${fileName} - 候选URL与前一个重复，且无可用备选`);
+                    }
+                }
+
+                if (fileUrl) {
+                    attachmentUrls.push({ name: fileName, url: fileUrl, method });
+                    usedUrls.add(fileUrl);
+                    appLogger.info(`✅ [附件URL] ${fileName} - 通过"${method}"提取成功`);
+                } else {
+                    appLogger.warn(`❌ [附件URL] 所有提取方法失败 - ${fileName}`);
+                }
+            }
+
+            appLogger.info(`✅ [附件URL提取] 完成，得到 ${attachmentUrls.length} 个URL`);
+            const validCount = attachmentUrls.filter(a => a.url).length;
+            appLogger.info(`  有效URL: ${validCount}/${attachmentUrls.length}`);
+            
+            // 后置检查：如果结果不完整，给 preview 页面更多时间回传
+            if (fileItems.length > 1 && attachmentUrls.length < fileItems.length) {
+                appLogger.info(`⏳ [附件URL提取] 后置检查启动：期望 ${fileItems.length} 个文件，仅得到 ${attachmentUrls.length} 个，等待延迟的 preview 回传...`);
+                appLogger.info(`   当前缓存结果数: ${window._zhsPreviewFileResults?.length || 0}`);
+                
+                for (let waitIdx = 1; waitIdx <= 20; waitIdx++) {
+                    await sleep(300);
+
+                    // 定期从共享存储回读，补偿 opener 通知漏接
+                    if (waitIdx === 1 || waitIdx % 2 === 0) {
+                        await pullSharedPreviewResultsFromStorage(`后置检查第${waitIdx}轮`);
+                    }
+                    
+                    const cacheLen = window._zhsPreviewFileResults?.length || 0;
+                    const needMin = fileItems.length;
+                    
+                    if (cacheLen >= needMin && attachmentUrls.length < fileItems.length) {
+                        appLogger.info(`✅ [附件URL提取] 后置检查第 ${waitIdx} 轮命中：缓存已有 ${cacheLen} 个结果（期望 ≥${needMin}）`);
+                        
+                        const missingItems = fileItems.filter((item, idx) => {
+                            const name = item.querySelector('.box, .line1')?.textContent?.trim() || `附件_${idx + 1}`;
+                            const normalized = normalizeFileName(name);
+                            const found = attachmentUrls.find(au => {
+                                return isLikelySamePreviewName(au.name, normalized);
+                            });
+                            return !found;
+                        });
+                        
+                        appLogger.info(`   缺失文件数: ${missingItems.length}`);
+                        
+                        for (const missingItem of missingItems) {
+                            const fileName = missingItem.querySelector('.box, .line1')?.textContent?.trim() || `附件_${fileItems.indexOf(missingItem) + 1}`;
+                            const normalizedName = normalizeFileName(fileName);
+                            const expectedExt = getExpectedExtFromFileName(fileName);
+                            
+                            appLogger.info(`   尝试匹配: "${fileName}" (ext: "${expectedExt}")`);
+                            
+                            const matchedResult = window._zhsPreviewFileResults.find((result) => {
+                                if (!result?.fileName) return false;
+                                const nameMatch = isLikelySamePreviewName(result.fileName, normalizedName);
+                                const extMatch = expectedExt && result?.fileUrl && result.fileUrl.includes(expectedExt) && (result.fileUrl.includes('file.zhihuishu.com') || result.fileUrl.includes('aliyuncs.com'));
+                                return nameMatch || extMatch;
+                            });
+                            
+                            if (matchedResult?.fileUrl) {
+                                attachmentUrls.push({ 
+                                    name: fileName, 
+                                    url: matchedResult.fileUrl, 
+                                    method: '后置 Preview 缓存匹配' 
+                                });
+                                appLogger.info(`✅       成功匹配: ${fileName} -> ${matchedResult.fileUrl.substring(0, 80)}...`);
+                                break;
+                            } else {
+                                appLogger.info(`⚠️       未找到匹配`);
+                            }
+                        }
+                        
+                        if (attachmentUrls.length >= fileItems.length) {
+                            appLogger.info(`✅ [附件URL提取] 后置检查完成：已补齐所有附件 (${attachmentUrls.length}/${fileItems.length})`);
+                            break;
+                        }
+                    }
+                    
+                    if (waitIdx % 5 === 0) {
+                        appLogger.debug(`   [后置检查] 第 ${waitIdx} 轮等待中... 缓存: ${cacheLen}/${needMin}`);
+                    }
+                }
+                
+                if (attachmentUrls.length < fileItems.length) {
+                    appLogger.info(`⏳ [附件URL提取] 后置检查结束，仍缺少 ${fileItems.length - attachmentUrls.length} 个文件`);
+                }
+            }
+            
+            // 🔍 诊断：如果完全没有 URL，显示页面信息
+            if (attachmentUrls.length === 0 && fileItems.length > 0) {
+                appLogger.warn('⚠️ [附件URL诊断] 虽然找到了 ' + fileItems.length + ' 个文件项，但都没有提取到 URL');
+                appLogger.info('📎 [页面诊断] 第一个文件项的 HTML 结构：');
+                const firstItem = fileItems[0];
+                appLogger.info('  tagName: ' + firstItem.tagName);
+                appLogger.info('  className: ' + firstItem.className);
+                appLogger.info('  HTML: ' + firstItem.outerHTML.substring(0, 300));
+                appLogger.info('📎 [页面诊断] 页面上所有链接（<a> 标签）：');
+                const allLinks = document.querySelectorAll('a[href]');
+                let linkCount = 0;
+                allLinks.forEach((link) => {
+                    if (linkCount < 20) {  // 只显示前 20 个
+                        appLogger.info(`  ${linkCount + 1}. ${link.href}`);
+                        linkCount++;
+                    }
+                });
+                if (allLinks.length > 20) {
+                    appLogger.info(`  ... 还有 ${allLinks.length - 20} 个链接`);
+                }
+            }
+            
+            return attachmentUrls;
+        } catch (e) {
+            appLogger.error('❌ [附件URL提取] 异常:', e);
+            return [];
+        }
+    }
     
     // 启动作业分析（从悬浮球触发）
     async function startHomeworkAnalysis() {
         appLogger.info('🖱️ [作业分析] 从悬浮球启动分析...');
         
         const currentUrl = window.location.href;
-        const isHomeworkDetailsPage = currentUrl.includes('/homeworkDetails') || 
-                                     currentUrl.includes('/homework/details') ||
-                                     currentUrl.includes('/homework/detail') ||
-                                     currentUrl.includes('pre-space-hike/homeworkDetails');
+        const isHomeworkOrExamDetailsPage = currentUrl.includes('/homeworkDetails') || 
+                                           currentUrl.includes('/homework/details') ||
+                                           currentUrl.includes('/homework/detail') ||
+                                           currentUrl.includes('pre-space-hike/homeworkDetails') ||
+                                           currentUrl.includes('/examDetails') ||
+                                           currentUrl.includes('/exam/details') ||
+                                           currentUrl.includes('/exam/detail') ||
+                                           currentUrl.includes('pre-space-hike/examDetails');
         
-        if (!isHomeworkDetailsPage) {
-            showNotification('⚠️ 请先进入作业详情页面', '#FF9800');
-            appLogger.warn('⚠️ [作业分析] 当前不在作业详情页面，无法分析');
+        if (!isHomeworkOrExamDetailsPage) {
+            showNotification('⚠️ 请先进入作业或考试详情页面', '#FF9800');
+            appLogger.warn('⚠️ [作业分析] 当前不在作业/考试详情页面，无法分析');
             return;
         }
         
@@ -5394,9 +6112,112 @@ window.addEventListener('unhandledrejection', (e) => {
             
             appLogger.info('📤 [作业分析] 作业信息已提取，调用AI分析...');
             
+            // 处理附件（如果有）
+            if (homeworkDetails.attachments && homeworkDetails.attachments.length > 0) {
+                appLogger.info('📎 [作业分析] 开始处理附件...');
+                showNotification('📎 处理附件中...', '#2196F3');
+                
+                try {
+                    // 提取附件URL
+                    appLogger.info('📎 [作业分析] 开始提取附件URL...');
+                    const attachmentData = await extractAttachmentUrls();
+                    appLogger.info(`📎 [作业分析] 提取完成，得到 ${attachmentData.length} 个结果`);
+                    
+                    const validUrls = attachmentData.filter(a => a.url);
+                    appLogger.info(`📎 [作业分析] 有效URL: ${validUrls.length} 个`);
+                    
+                    if (validUrls.length > 0) {
+                        appLogger.info(`📎 [作业分析] 准备下载 ${validUrls.length} 个附件`);
+                        
+                        // 🔍 详细日志：打印实际URL
+                        validUrls.forEach((urlObj, idx) => {
+                            appLogger.info(`📎 [URL${idx + 1}] 名称: ${urlObj.name}`);
+                            appLogger.info(`📎 [URL${idx + 1}] 地址: ${urlObj.url}`);
+                            appLogger.info(`📎 [URL${idx + 1}] 方法: ${urlObj.method}`);
+                        });
+                        
+                        // 发送给background.js下载和解析
+                        appLogger.info('📎 [作业分析] 发送消息给background.js开始下载...');
+                        const parseResult = await new Promise((resolve) => {
+                            chrome.runtime.sendMessage({
+                                action: 'downloadAttachments',
+                                urls: validUrls
+                            }, (response) => {
+                                appLogger.info('📎 [作业分析] 收到background.js响应');
+                                appLogger.debug('   response:', response);
+                                appLogger.debug('   success:', response?.success);
+                                appLogger.debug('   attachments长度:', response?.attachments?.length);
+                                
+                                if (chrome.runtime.lastError) {
+                                    appLogger.warn('⚠️ [作业分析] 附件处理通信失败:', chrome.runtime.lastError);
+                                    resolve([]);
+                                } else if (response && response.success) {
+                                    appLogger.info('✅ [作业分析] 附件处理完成');
+                                    const attachments = response.attachments || [];
+                                    appLogger.info(`📎 [作业分析] 返回 ${attachments.length} 个附件`);
+                                    resolve(attachments);
+                                } else {
+                                    appLogger.warn('⚠️ [作业分析] 附件处理返回失败:', response?.error);
+                                    resolve([]);
+                                }
+                            });
+                        });
+                        
+                        // 合并附件内容到分析数据
+                        appLogger.info(`📎 [作业分析] parseResult.length = ${parseResult.length}`);
+                        if (parseResult.length > 0) {
+                            appLogger.info('✅ [作业分析] 进入合并逻辑');
+                            homeworkDetails.attachmentContents = parseResult;
+                            
+                            // 🔍 详细日志：检查每个附件的实际内容
+                            parseResult.forEach((att, idx) => {
+                                appLogger.info(`📎 [附件${idx + 1}] 文件名: ${att.fileName}`);
+                                appLogger.info(`📎 [附件${idx + 1}] 内容长度: ${att.content?.length || 0} 字符`);
+                                appLogger.info(`📎 [附件${idx + 1}] 内容预览: ${att.content?.substring(0, 100) || '(无内容)'}`);
+                                if (att.content && (att.content.includes('下载失败') || att.content.includes('解析失败') || att.content.includes('无法解析'))) {
+                                    appLogger.warn(`⚠️ [附件${idx + 1}] 检测到错误信息: ${att.content}`);
+                                }
+                            });
+                            
+                            const fullContentSummary = parseResult
+                                .map(a => `【${a.fileName}】\n${a.content || ''}`)
+                                .join('\n\n');
+                            const contentSummary = parseResult
+                                .map(a => `【${a.fileName}】\n${a.content.substring(0, 200)}`)
+                                .join('\n\n');
+                            homeworkDetails.attachmentSummary = contentSummary;
+                            homeworkDetails.attachmentSummaryFull = fullContentSummary;
+                            appLogger.info(`📎 [作业分析] 附件内容已合并到分析数据`);
+                            appLogger.info(`📎 [作业分析] 附件摘要长度: ${contentSummary.length} 字符`);
+                        } else {
+                            appLogger.warn(`⚠️ [作业分析] parseResult为空，无法获取附件内容`);
+                        }
+                    } else {
+                        appLogger.info('⚠️ [作业分析] 无法获得有效的附件URL');
+                    }
+                } catch (e) {
+                    appLogger.warn('⚠️ [作业分析] 附件处理异常:', e.message);
+                    // 继续分析，不中断流程
+                }
+            }
+            
             // 调用AI分析
             const analysis = await analyzeHomeworkWithAI(homeworkDetails);
-            
+
+            // 在结果面板中展示附件提取全文（题号/选项结构化）
+            analysis.extractedAttachmentContents = Array.isArray(homeworkDetails.attachmentContents)
+                ? homeworkDetails.attachmentContents
+                : [];
+            analysis.attachmentSummaryFull = homeworkDetails.attachmentSummaryFull || '';
+
+            // 答案优先级：老师提供答案 > AI基于材料推导
+            if (analysis && !analysis.referenceAnswer && homeworkDetails.teacherProvidedAnswer) {
+                analysis.referenceAnswer = homeworkDetails.teacherProvidedAnswer;
+                analysis.referenceAnswerType = 'objective';
+                analysis.referenceAnswerSource = 'teacher';
+                appLogger.info('🧩 [作业分析] 已用老师提供答案回填答案部分');
+            }
+
             // 显示结果
             showAnalysisPanel(analysis);
             showNotification('✅ 分析完成！', '#4CAF50');
@@ -5412,938 +6233,12 @@ window.addEventListener('unhandledrejection', (e) => {
     }
     
     // ==========================================
-    // 8. 作业详情分析功能（检测和分析作业题目）
+    // 8. 作业详情分析功能
     // ==========================================
-    
-    // 提取作业详情页面的信息
-    function extractHomeworkDetails() {
-        try {
-            appLogger.info('🔍 [作业详情] 开始提取作业信息...');
-            
-            const details = {
-                title: '',
-                content: '',
-                maxScore: 0,
-                deadline: '',
-                knowledgePoints: [],
-                requirements: '',
-                extractTime: new Date().toISOString()
-            };
-            
-            // 1. 提取标题 - 适配不同平台的HTML结构
-            const titleSelectors = [
-                // Polymas 平台 - 按优先级排列
-                '.homework-base-info-header h4',
-                '.homework-base-info-header h4 > div',
-                'h4[data-v-ec5d307c]',
-                'h4 div[data-v-3980a020]',
-                // 智慧树平台
-                'h1.title',
-                'h1',
-                '[class*="title"] h1',
-                '[class*="homework"] h1',
-                '.detail-title',
-                'h2'
-            ];
-            
-            appLogger.debug('🔧 [标题提取] 尝试提取标题，共', titleSelectors.length, '个选择器');
-            
-            for (let i = 0; i < titleSelectors.length; i++) {
-                const selector = titleSelectors[i];
-                const titleEl = document.querySelector(selector);
-                appLogger.debug(`  [${i}] 选择器: "${selector}" -> ${titleEl ? '✅ 找到' : '❌ 未找到'}`);
-                
-                if (titleEl) {
-                    // 尝试多种方式获取文本
-                    let title = '';
-                    
-                    // 方法1: innerText（推荐，只获取可见文本）
-                    try {
-                        title = titleEl.innerText?.trim() || '';
-                    } catch (e) {}
-                    
-                    // 方法2: textContent（所有文本）
-                    if (!title) {
-                        title = titleEl.textContent?.trim() || '';
-                    }
-                    
-                    // 方法3: 直接提取直接子节点的文本
-                    if (!title) {
-                        const childNodes = Array.from(titleEl.childNodes)
-                            .filter(node => node.nodeType === Node.TEXT_NODE)
-                            .map(node => node.textContent.trim())
-                            .filter(text => text.length > 0);
-                        title = childNodes.join('');
-                    }
-                    
-                    appLogger.debug(`      原始文本 (长度${title.length}): "${title.substring(0, 60)}..."`);
-                    
-                    // 多步清理文本
-                    title = title
-                        .replace(/<!---->/g, '')  // 去除Vue注释
-                        .replace(/\s+/g, ' ')     // 合并多个空白为单个空格
-                        .replace(/^[\s•●◆◇▪▫─→←↑↓↔●\d.，。、；：]+/, '') // 去除前缀
-                        .replace(/[\s•●◆◇▪▫─→←↑↓↔●\d.，。、；：]+$/, '') // 去除后缀
-                        .trim();
-                    
-                    appLogger.debug(`      清理后 (长度${title.length}): "${title}"`);
-                    
-                    if (title.length > 2 && title.length < 200) {
-                        details.title = title;
-                        appLogger.info(`✅ [作业详情] 标题提取成功 (${selector}): ${details.title}`);
-                        break;
-                    } else {
-                        appLogger.debug(`      ⚠️ 标题长度不符合: ${title.length} (需要 3-199)`);
-                    }
-                }
-            }
-            
-            if (!details.title) {
-                console.warn('⚠️ [标题提取] 所有标题选择器都失败，尝试从内容中提取');
-                // 降级方案：从内容中提取第一行作为标题
-                const introEl = document.querySelector('.homework-base-info-intro p');
-                if (introEl) {
-                    const text = introEl.innerText?.trim() || introEl.textContent?.trim() || '';
-                    const firstLine = text.split(/[。！？\n]/)[0].trim();
-                    if (firstLine && firstLine.length > 2 && firstLine.length < 200) {
-                        details.title = firstLine;
-                        appLogger.info('📝 [作业详情] 标题 (降级方案-简介):', details.title);
-                    }
-                }
-            }
-            
-            if (!details.title) {
-                console.error('❌ [标题提取] 降级方案也失败了');
-            }
-            
-            // 2. 提取满分 - 多种格式支持
-            const fullText = document.body.textContent;
-            let scoreMatches = [
-                /满分[：:]\s*(\d+)/,
-                /满分(\d+)分/,
-                /满分\s*(\d+)\s*分/
-            ];
-            for (let pattern of scoreMatches) {
-                const match = fullText.match(pattern);
-                if (match) {
-                    details.maxScore = parseInt(match[1]);
-                    appLogger.info('⭐ [作业详情] 满分:', details.maxScore);
-                    break;
-                }
-            }
-            
-            // 3. 提取截止时间
-            const deadlineMatches = [
-                /截止时间[：:]\s*(.+?)(?=\n|$)/,
-                /截止时间\s+(.+?)(?=\n|$)/,
-                /截止[\s：:]*(.+?)(?=\n|$)/
-            ];
-            for (let pattern of deadlineMatches) {
-                const match = fullText.match(pattern);
-                if (match) {
-                    details.deadline = match[1].trim().substring(0, 50);
-                    appLogger.info('⏰ [作业详情] 截止时间:', details.deadline);
-                    break;
-                }
-            }
-            
-            // 4. 提取作业内容 - 按优先级尝试不同选择器
-            const contentSelectors = [
-                // Polymas 平台
-                '.customize-base-info-preview',
-                '.customize-base-info-preview p',
-                '.requirements-content',
-                // 通用选择器
-                '.homework-content',
-                '[class*="homework-content"]',
-                '[class*="content"]',
-                '.detail-content',
-                '[class*="detail"] [class*="content"]',
-                'main',
-                '.main-content',
-                '[class*="description"]',
-                '[class*="desc"]'
-            ];
-            
-            let foundContent = false;
-            for (let selector of contentSelectors) {
-                const contentEl = document.querySelector(selector);
-                if (contentEl) {
-                    const text = contentEl.textContent.trim();
-                    // 去除过短的文本
-                    if (text && text.length > 20 && !text.includes('html') && !text.includes('GET')) {
-                        // 限制长度，避免过长的文本
-                        details.content = text.substring(0, 2000);
-                        appLogger.debug(`📄 [作业详情] 内容 (${selector}): ${details.content.substring(0, 80)}...`);
-                        foundContent = true;
-                        break;
-                    }
-                }
-            }
-            
-            if (!foundContent) {
-                // 降级方案：查找作业简介
-                const introSelectors = [
-                    '.homework-base-info-intro p',
-                    '.homework-base-info-intro',
-                    '[class*="intro"]'
-                ];
-                for (let selector of introSelectors) {
-                    const el = document.querySelector(selector);
-                    if (el) {
-                        const text = el.textContent.trim();
-                        if (text && text.length > 10) {
-                            details.content = text;
-                            appLogger.debug(`📄 [作业详情] 内容 (降级-简介): ${details.content.substring(0, 80)}...`);
-                            foundContent = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            if (!foundContent) {
-                // 最后降级：使用整个body的文本
-                const scripts = document.querySelectorAll('script, style, nav');
-                const clonedBody = document.body.cloneNode(true);
-                clonedBody.querySelectorAll('script, style, nav').forEach(s => s.remove());
-                let bodyText = clonedBody.textContent.trim();
-                if (bodyText.length > 100) {
-                    details.content = bodyText.substring(0, 2000);
-                    appLogger.debug(`📄 [作业详情] 内容 (降级-body): ${details.content.substring(0, 80)}...`);
-                    foundContent = true;
-                }
-            }
-            
-            appLogger.info(`📊 [作业详情] 内容提取: ${foundContent ? '✅ 成功' : '⚠️ 无内容或提取失败'}, 标题: ${details.title ? '✅ 有' : '❌ 无'}`);
-            
-            // 5. 提取知识点
-            const klgSelectors = [
-                '[class*="klg"]',
-                '.knowledge-point',
-                '[class*="knowledge"]',
-                '[class*="tag"]',
-                '[class*="label"]'
-            ];
-            const knowledgePointsSet = new Set();
-            for (let selector of klgSelectors) {
-                const klgElements = document.querySelectorAll(selector);
-                klgElements.forEach(el => {
-                    const text = el.textContent.trim();
-                    if (text && text.length > 0 && text.length < 50 && !text.includes('http')) {
-                        knowledgePointsSet.add(text);
-                    }
-                });
-            }
-            details.knowledgePoints = Array.from(knowledgePointsSet).slice(0, 10);
-            appLogger.info('🎓 [作业详情] 知识点:', details.knowledgePoints.length > 0 ? details.knowledgePoints : '无');
-            
-            // 6. 提取其他要求信息
-            const otherReqs = [];
-            if (fullText.includes('允许迟交')) otherReqs.push('允许迟交');
-            if (fullText.includes('禁止迟交')) otherReqs.push('禁止迟交');
-            if (fullText.includes('禁止申请重做')) otherReqs.push('禁止申请重做');
-            if (fullText.includes('允许学生修改')) {
-                const modifyMatch = fullText.match(/允许学生修改(\d+)次/);
-                if (modifyMatch) otherReqs.push(`允许学生修改${modifyMatch[1]}次`);
-            }
-            details.requirements = otherReqs.join('；');
-            appLogger.info('📋 [作业详情] 要求:', details.requirements || '无特殊要求');
-            
-            // 调试信息
-            appLogger.debug('🔧 [作业详情] 最终提取结果:');
-            appLogger.debug('  ✓ 标题:', details.title ? `"${details.title}"` : '❌ 未提取');
-            appLogger.debug('  ✓ 内容:', details.content.length > 0 ? `${details.content.length} 字` : '❌ 无');
-            appLogger.debug('  ✓ 满分:', details.maxScore > 0 ? details.maxScore : '❌ 未提取');
-            appLogger.debug('  ✓ 知识点:', details.knowledgePoints.length);
-            appLogger.debug('  ✓ 要求:', details.requirements || '无');
-            
-            return details;
-        } catch (error) {
-            console.error('❌ [作业详情] 提取失败:', error);
-            console.debug('❌ [作业详情] 错误堆栈:', error.stack);
-            return null;
-        }
-    }
-    
-    // 调用API分析作业类型和批改建议
-    function pingBackground(timeoutMs = 3000) {
-        return new Promise((resolve) => {
-            let settled = false;
-            const timerId = setTimeout(() => {
-                if (settled) return;
-                settled = true;
-                resolve(false);
-            }, timeoutMs);
+    // 注意：作业详情提取函数已迁移到 content-parser.js
+    // 包括：extractHomeworkDetails, analyzeHomeworkWithAI 等
 
-            chrome.runtime.sendMessage({ action: 'ping' }, (response) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timerId);
-
-                if (chrome.runtime.lastError) {
-                    console.warn('⚠️ [作业分析] 后台Ping失败:', chrome.runtime.lastError.message);
-                    resolve(false);
-                    return;
-                }
-
-                resolve(!!(response && response.success));
-            });
-        });
-    }
-
-    function analyzeHomeworkWithAI(homeworkDetails) {
-        const maxAttempts = 2;
-        const warnAfterMs = 10000;
-        const hardTimeoutMs = 90000;
-
-        const attemptAnalyze = (attempt) => {
-            return new Promise((resolve, reject) => {
-                appLogger.info(`🤖 [作业分析] 准备调用AI进行分析... (第${attempt}次)`);
-                appLogger.debug('📤 [作业分析] 发送数据到background:', homeworkDetails);
-
-                let settled = false;
-                const finalize = (handler) => {
-                    if (settled) return;
-                    settled = true;
-                    clearTimeout(warnTimeoutId);
-                    clearTimeout(hardTimeoutId);
-                    handler();
-                };
-
-                const warnTimeoutId = setTimeout(() => {
-                    console.warn('⏳ [作业分析] 等待AI响应中... (已超过10秒)');
-                    showNotification('⏳ AI分析中，请稍候...', '#FF9800');
-                }, warnAfterMs);
-
-                const hardTimeoutId = setTimeout(() => {
-                    console.error(`⏰ [作业分析] AI响应超时（${hardTimeoutMs / 1000}秒）`);
-                    finalize(() => reject(new Error('AI响应超时，请稍后重试')));
-                }, hardTimeoutMs);
-
-                chrome.runtime.sendMessage({
-                    action: 'analyzeHomeworkDetails',
-                    data: homeworkDetails
-                }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        appLogger.error('❌ [作业分析] 通信错误:', chrome.runtime.lastError);
-                        finalize(() => reject(new Error(chrome.runtime.lastError.message || '通信失败')));
-                    } else if (response && response.success) {
-                        appLogger.info('✅ [作业分析] 分析成功');
-                        finalize(() => resolve(response.analysis));
-                    } else if (!response) {
-                        appLogger.error('❌ [作业分析] 未收到AI响应');
-                        finalize(() => reject(new Error('未收到AI响应')));
-                    } else {
-                        appLogger.error('❌ [作业分析] API返回错误:', response);
-                        finalize(() => reject(new Error(response?.error || 'AI分析失败')));
-                    }
-                });
-            });
-        };
-
-        return pingBackground().then((ok) => {
-            if (!ok) {
-                throw new Error('后台未响应，请重新加载扩展后重试');
-            }
-            return attemptAnalyze(1).catch((error) => {
-                if (maxAttempts > 1) {
-                    console.warn('🔁 [作业分析] 第一次失败，准备重试一次...', error.message);
-                    showNotification('🔁 AI分析失败，正在重试...', '#FF9800');
-                    return attemptAnalyze(2);
-                }
-                throw error;
-            });
-        });
-    }
-
-    const MANUAL_EDITOR_STYLES = {
-        panel: `
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 92%;
-            max-width: 920px;
-            max-height: 88vh;
-            background: #ececec;
-            border: 1px solid #d4d4d4;
-            border-radius: 24px;
-            box-shadow: 0 14px 30px rgba(0, 0, 0, 0.12);
-            z-index: 10000;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-            font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            color: #242424;
-            box-sizing: border-box;
-        `,
-        header: `
-            background: #e3e3e3;
-            color: #242424;
-            padding: 18px 20px;
-            font-weight: 700;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid #d1d1d1;
-            font-size: 22px;
-            letter-spacing: 0.2px;
-        `,
-        content: `
-            flex: 1;
-            overflow-y: auto;
-            overflow-x: hidden;
-            padding: 24px 30px;
-            background: #ececec;
-            box-sizing: border-box;
-        `,
-        section: 'background:#f0f0f0;border:1px solid #d2d2d2;border-radius:18px; width:100%; max-width:100%; box-sizing:border-box; overflow:hidden;',
-        sectionPill: 'display:inline-flex;align-items:center;background:#dfdfdf;border:1px solid #cecece;border-radius:999px;padding:4px 10px;font-size:14px;font-weight:700;'
-    };
-    
-    // 显示作业分析结果面板（可编辑版本）
-    function showAnalysisPanel(analysis, isManual = false) {
-        appLogger.info('🎨 [作业分析] 创建分析结果面板...', isManual ? '(手动模式)' : '(AI生成)');
-        
-        // 移除已有的面板
-        const existingPanel = document.getElementById('zh-analysis-panel');
-        if (existingPanel) existingPanel.remove();
-        
-        const panel = document.createElement('div');
-        panel.id = 'zh-analysis-panel';
-        panel.setAttribute('role', 'dialog');
-        panel.setAttribute('aria-modal', 'true');
-        panel.setAttribute('aria-label', '手动设置评分标准');
-        panel.style.cssText = MANUAL_EDITOR_STYLES.panel;
-
-        const header = document.createElement('div');
-        header.style.cssText = MANUAL_EDITOR_STYLES.header;
-        header.innerHTML = `
-            <span>手动设置评分标准</span>
-            <button id="zh-panel-close-btn" aria-label="关闭设置面板" style="background: #efefef; border: 1px solid #cecece; color: #333; width: 34px; height: 34px; border-radius: 999px; cursor: pointer; font-size: 18px;">×</button>
-        `;
-
-        const closeBtn = header.querySelector('#zh-panel-close-btn');
-        closeBtn.addEventListener('click', () => panel.remove());
-
-        const content = document.createElement('div');
-        content.style.cssText = MANUAL_EDITOR_STYLES.content;
-
-        const previousCriteriaItems = Array.isArray(analysis.gradingCriteriaItems)
-            ? analysis.gradingCriteriaItems
-            : (Array.isArray(AUTO_GRADING_STATE.autoGradingConditions.gradingCriteriaItems)
-                ? AUTO_GRADING_STATE.autoGradingConditions.gradingCriteriaItems
-                : []);
-
-        const defaultCriteriaNames = ['论点清晰度', '论据充分性', '语言逻辑', '创新性'];
-        const defaultScores = [30, 30, 20, 20];
-
-        let criteriaItems = [];
-        if (previousCriteriaItems.length > 0) {
-            criteriaItems = previousCriteriaItems.map((item, idx) => ({
-                id: `item-${Date.now()}-${idx}`,
-                name: (item?.name || '').trim(),
-                score: Number.isFinite(Number(item?.score)) ? Math.min(100, Math.max(0, Math.round(Number(item.score)))) : 0
-            }));
-        } else if (Array.isArray(analysis.gradingCriteria) && analysis.gradingCriteria.length > 0) {
-            criteriaItems = analysis.gradingCriteria.map((text, idx) => {
-                const parsed = parseLegacyCriterionText(text);
-                return {
-                id: `item-${Date.now()}-${idx}`,
-                name: parsed.name,
-                score: parsed.score > 0 ? parsed.score : Math.min(100, Math.max(0, Math.round(defaultScores[idx] ?? 0)))
-                };
-            });
-        } else {
-            criteriaItems = defaultCriteriaNames.map((name, idx) => ({
-                id: `item-${Date.now()}-${idx}`,
-                name,
-                score: Math.min(100, Math.max(0, Math.round(defaultScores[idx] ?? 0)))
-            }));
-        }
-
-        const initialAdviceRich = analysis.gradingAdviceRich || '';
-        const initialAdvicePlain = analysis.gradingAdvice || '';
-
-        content.innerHTML = `
-            <div style="display:flex; flex-direction:column; gap:20px; width:100%; max-width:100%; box-sizing:border-box;">
-                <section style="background:#f0f0f0;border:1px solid #d2d2d2;border-radius:18px;padding:18px 20px 20px; width:100%; max-width:100%; box-sizing:border-box; overflow:hidden;">
-                    <div style="${MANUAL_EDITOR_STYLES.sectionPill}margin-bottom:14px;">作业类型</div>
-                    <div style="display:flex;flex-direction:column;gap:12px;">
-                        <label style="font-size:15px;color:#4b4b4b;">作业类型分类</label>
-                        <input id="zh-homework-type" type="text" value="${analysis.homeworkType || ''}" placeholder="例：论述题"
-                            style="width:100%;max-width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #cfcfcf;border-radius:12px;font-size:16px;outline:none;background:#f7f7f7;color:#2b2b2b;">
-                        <label style="font-size:15px;color:#4b4b4b;">作业类型说明</label>
-                        <textarea id="zh-type-explanation" placeholder="可选，例：本题考察..."
-                            style="width:100%;max-width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #cfcfcf;border-radius:12px;font-size:16px;min-height:84px;outline:none;resize:vertical;background:#f7f7f7;color:#2b2b2b;">${analysis.typeExplanation || ''}</textarea>
-                    </div>
-                </section>
-
-                <section style="${MANUAL_EDITOR_STYLES.section}padding:18px 20px 16px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;">
-                        <div style="${MANUAL_EDITOR_STYLES.sectionPill}">评分标准</div>
-                        <button id="zh-toggle-name-mode" type="button" aria-label="切换评分项名称显示模式" style="background:#f3f3f3;color:#2d2d2d;border:1px solid #cfcfcf;padding:7px 11px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">名称显示：自动换行</button>
-                    </div>
-                    <div id="zh-criteria-list" style="display:flex;flex-direction:column;gap:10px; width:100%; max-width:100%; box-sizing:border-box;"></div>
-                    <div style="display:flex;justify-content:flex-end;margin-top:12px;">
-                        <button id="zh-add-criterion-btn" aria-label="添加评分项" style="background:#f3f3f3;color:#2d2d2d;border:1px solid #cfcfcf;padding:9px 14px;border-radius:12px;cursor:pointer;font-size:15px;font-weight:600;">+ 添加评分项</button>
-                    </div>
-                    <div id="zh-score-sum-hint" style="margin-top:10px;font-size:13px;color:#646464;line-height:1.5;">提示：各项分值总和建议为100分</div>
-                    <div style="margin-top:6px;font-size:12px;color:#6a6a6a;line-height:1.5;">拖拽手柄可排序；手柄聚焦后可用 ↑/↓ 调整顺序；Ctrl+Enter 保存，Esc 关闭。</div>
-                </section>
-
-                <section style="${MANUAL_EDITOR_STYLES.section}padding:18px 20px;">
-                    <div style="${MANUAL_EDITOR_STYLES.sectionPill}margin-bottom:12px;">批改建议与注意事项</div>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-                        <button id="zh-rt-bold" type="button" aria-label="加粗选中文本" style="background:#f5f5f5;border:1px solid #cfcfcf;border-radius:10px;padding:7px 11px;cursor:pointer;font-size:14px;">加粗</button>
-                        <button id="zh-rt-list" type="button" aria-label="将选中文本转换为列表" style="background:#f5f5f5;border:1px solid #cfcfcf;border-radius:10px;padding:7px 11px;cursor:pointer;font-size:14px;">列表</button>
-                        <button id="zh-rt-template" type="button" aria-label="插入评语模板" style="background:#f5f5f5;border:1px solid #cfcfcf;border-radius:10px;padding:7px 11px;cursor:pointer;font-size:14px;">插入评语模板</button>
-                    </div>
-                    <div id="zh-grading-advice-editor" contenteditable="true" aria-label="批改建议编辑区" tabindex="0"
-                        style="min-height:152px;background:#f7f7f7;border:1px solid #cfcfcf;border-radius:12px;padding:14px 14px;font-size:16px;line-height:1.8;outline:none;color:#2b2b2b;white-space:pre-wrap;overflow-wrap:anywhere;">${initialAdviceRich || initialAdvicePlain}</div>
-                </section>
-
-                <div style="display:flex;justify-content:space-between;gap:12px;margin-top:8px;">
-                    <button id="zh-cancel-analysis-btn" style="min-width:120px;background:#f3f3f3;color:#2d2d2d;border:1px solid #cfcfcf;padding:12px 16px;border-radius:12px;cursor:pointer;font-size:16px;font-weight:600;">取消</button>
-                    <button id="zh-save-analysis-btn" style="min-width:140px;background:#2a2a2a;color:#fff;border:1px solid #2a2a2a;padding:12px 18px;border-radius:12px;cursor:pointer;font-size:16px;font-weight:600;">保存设置</button>
-                </div>
-            </div>
-        `;
-
-        panel.appendChild(header);
-        panel.appendChild(content);
-        document.body.appendChild(panel);
-
-        const criteriaListEl = panel.querySelector('#zh-criteria-list');
-        const scoreSumHintEl = panel.querySelector('#zh-score-sum-hint');
-        const toggleNameModeBtn = panel.querySelector('#zh-toggle-name-mode');
-        const saveAnalysisBtn = panel.querySelector('#zh-save-analysis-btn');
-        const closePanel = () => panel.remove();
-
-        let criteriaNameDisplayMode = AUTO_GRADING_STATE.criteriaNameDisplayMode === 'single-line' ? 'single-line' : 'wrap';
-        let dragSourceId = null;
-        const dropPlaceholder = document.createElement('div');
-        dropPlaceholder.style.cssText = 'height:44px;border:1px dashed #8f8f8f;border-radius:10px;background:#ededed;';
-
-        function updateNameModeButtonText() {
-            if (!toggleNameModeBtn) return;
-            toggleNameModeBtn.textContent = criteriaNameDisplayMode === 'single-line'
-                ? '名称显示：单行省略'
-                : '名称显示：自动换行';
-        }
-
-        function applyNameDisplayMode(nameInput) {
-            if (criteriaNameDisplayMode === 'single-line') {
-                nameInput.style.whiteSpace = 'nowrap';
-                nameInput.style.overflow = 'hidden';
-                nameInput.style.textOverflow = 'ellipsis';
-                nameInput.style.height = '44px';
-                nameInput.style.resize = 'none';
-            } else {
-                nameInput.style.whiteSpace = 'pre-wrap';
-                nameInput.style.overflow = 'hidden';
-                nameInput.style.textOverflow = 'clip';
-                nameInput.style.resize = 'none';
-                nameInput.style.height = 'auto';
-            }
-        }
-
-        function normalizeScore(value) {
-            const parsed = parseInt(String(value), 10);
-            if (!Number.isFinite(parsed)) return 0;
-            return Math.min(100, Math.max(0, parsed));
-        }
-
-        function getScoreSum() {
-            return criteriaItems.reduce((sum, item) => sum + (Number(item.score) || 0), 0);
-        }
-
-        function isCompactCriteriaLayout() {
-            return panel.clientWidth < 760;
-        }
-
-        function updateScoreSumHint() {
-            const total = getScoreSum();
-            scoreSumHintEl.textContent = `提示：各项分值总和建议为100分（当前：${total}分）`;
-            scoreSumHintEl.style.color = total === 100 ? '#2f6f3d' : (total > 100 ? '#b42318' : '#8a5a00');
-        }
-
-        function renderCriteriaItems() {
-            if (dropPlaceholder.parentNode) {
-                dropPlaceholder.remove();
-            }
-            criteriaListEl.innerHTML = '';
-            const compactLayout = isCompactCriteriaLayout();
-            criteriaItems.forEach((item, index) => {
-                const row = document.createElement('div');
-                row.className = 'zh-criterion-row';
-                row.draggable = true;
-                row.dataset.id = item.id;
-                row.style.cssText = `
-                    display:grid;
-                    grid-template-columns: ${compactLayout ? '22px minmax(0, 1fr) 24px' : '22px minmax(0, 1fr) 52px 72px 24px'};
-                    align-items:start;
-                    gap:${compactLayout ? '8px 10px' : '8px'};
-                    background:#f7f7f7;
-                    border:1px solid #d0d0d0;
-                    border-radius:12px;
-                    padding:12px 14px;
-                    width:100%;
-                    max-width:100%;
-                    box-sizing:border-box;
-                `;
-                row.innerHTML = `
-                    <button type="button" class="zh-drag-handle" data-item-id="${item.id}" aria-label="拖拽排序 第${index + 1}项" title="拖拽排序（支持键盘↑/↓）" style="display:flex;align-items:center;justify-content:center;cursor:grab;color:#666;font-size:12px;width:20px;height:20px;border-radius:999px;border:1px solid #cfcfcf;background:#ececec;">⋮⋮</button>
-                    <textarea class="zh-criterion-name" aria-label="评分项名称 ${index + 1}" placeholder="评分项 ${index + 1}" title="${(item.name || '').replace(/"/g, '&quot;')}" style="width:100%;max-width:100%;min-width:0;box-sizing:border-box;padding:10px 12px;border:1px solid #cfcfcf;border-radius:10px;font-size:15px;background:#fff;outline:none;line-height:1.45;resize:none;overflow-wrap:anywhere;${compactLayout ? 'grid-column:2 / 3;' : ''}">${item.name || ''}</textarea>
-                    <div class="zh-criterion-score-label" style="display:flex;align-items:center;justify-content:flex-end;gap:6px;color:#444;font-size:12px;white-space:nowrap;">分值</div>
-                    <div class="zh-criterion-score-wrap" style="display:flex;flex-direction:column;gap:4px;">
-                        <input type="number" class="zh-criterion-score" aria-label="评分项分值 ${index + 1}" min="0" max="100" step="1" value="${normalizeScore(item.score)}" style="width:100%;max-width:100%;min-width:0;box-sizing:border-box;padding:10px 8px;border:1px solid #cfcfcf;border-radius:10px;font-size:15px;background:#fff;outline:none;">
-                        <div class="zh-score-warning" style="display:none;font-size:11px;color:#b42318;line-height:1.3;">已自动限制为 100 分以内</div>
-                    </div>
-                    <button class="zh-remove-criterion" aria-label="删除评分项 ${index + 1}" title="删除" style="background:none;border:none;cursor:pointer;font-size:16px;color:#666;">🗑️</button>
-                `;
-
-                if (compactLayout) {
-                    const scoreLabel = row.querySelector('.zh-criterion-score-label');
-                    const scoreWrap = row.querySelector('.zh-criterion-score-wrap');
-                    const removeBtn = row.querySelector('.zh-remove-criterion');
-                    const dragHandle = row.querySelector('.zh-drag-handle');
-
-                    dragHandle.style.gridColumn = '1 / 2';
-                    dragHandle.style.gridRow = '1 / 2';
-
-                    removeBtn.style.gridColumn = '3 / 4';
-                    removeBtn.style.gridRow = '1 / 2';
-
-                    scoreLabel.style.gridColumn = '1 / 2';
-                    scoreLabel.style.gridRow = '2 / 3';
-                    scoreLabel.style.justifyContent = 'flex-start';
-
-                    scoreWrap.style.gridColumn = '2 / 4';
-                    scoreWrap.style.gridRow = '2 / 3';
-                }
-
-                const nameInput = row.querySelector('.zh-criterion-name');
-                const scoreInput = row.querySelector('.zh-criterion-score');
-                const scoreWarning = row.querySelector('.zh-score-warning');
-                const removeBtn = row.querySelector('.zh-remove-criterion');
-                const dragHandle = row.querySelector('.zh-drag-handle');
-
-                function autoResizeNameInput() {
-                    if (criteriaNameDisplayMode === 'single-line') {
-                        return;
-                    }
-                    nameInput.style.height = 'auto';
-                    const nextHeight = Math.max(44, nameInput.scrollHeight);
-                    nameInput.style.height = `${nextHeight}px`;
-                }
-
-                applyNameDisplayMode(nameInput);
-                autoResizeNameInput();
-
-                nameInput.addEventListener('input', () => {
-                    item.name = nameInput.value;
-                    nameInput.title = item.name;
-                    autoResizeNameInput();
-                });
-
-                scoreInput.addEventListener('input', () => {
-                    const raw = Number(scoreInput.value);
-                    const overflow = Number.isFinite(raw) && raw > 100;
-                    scoreWarning.style.display = overflow ? 'block' : 'none';
-                    scoreInput.style.borderColor = overflow ? '#d92d20' : '#cfcfcf';
-                    item.score = normalizeScore(scoreInput.value);
-                    updateScoreSumHint();
-                });
-
-                scoreInput.addEventListener('blur', () => {
-                    const normalized = normalizeScore(scoreInput.value);
-                    item.score = normalized;
-                    scoreInput.value = String(normalized);
-                    scoreWarning.style.display = 'none';
-                    scoreInput.style.borderColor = '#cfcfcf';
-                    updateScoreSumHint();
-                });
-
-                removeBtn.addEventListener('click', () => {
-                    criteriaItems = criteriaItems.filter(ci => ci.id !== item.id);
-                    renderCriteriaItems();
-                });
-
-                row.addEventListener('dragstart', (event) => {
-                    dragSourceId = item.id;
-                    event.dataTransfer.effectAllowed = 'move';
-                    event.dataTransfer.setData('text/plain', item.id);
-                    row.style.opacity = '0.55';
-                });
-                row.addEventListener('dragend', () => {
-                    dragSourceId = null;
-                    if (dropPlaceholder.parentNode) {
-                        dropPlaceholder.remove();
-                    }
-                    row.style.opacity = '1';
-                });
-                row.addEventListener('dragover', (event) => {
-                    event.preventDefault();
-                    if (!dragSourceId || dragSourceId === item.id) return;
-                    if (dropPlaceholder.parentNode !== criteriaListEl || dropPlaceholder.nextSibling !== row) {
-                        criteriaListEl.insertBefore(dropPlaceholder, row);
-                    }
-                    row.style.borderColor = '#9d9d9d';
-                });
-                row.addEventListener('dragleave', () => {
-                    row.style.borderColor = '#d0d0d0';
-                });
-                row.addEventListener('drop', (event) => {
-                    event.preventDefault();
-                    row.style.borderColor = '#d0d0d0';
-                    if (dropPlaceholder.parentNode) {
-                        dropPlaceholder.remove();
-                    }
-                    const dragId = event.dataTransfer.getData('text/plain');
-                    if (!dragId || dragId === item.id) return;
-
-                    const fromIndex = criteriaItems.findIndex(ci => ci.id === dragId);
-                    const toIndex = criteriaItems.findIndex(ci => ci.id === item.id);
-                    if (fromIndex < 0 || toIndex < 0) return;
-
-                    const [moved] = criteriaItems.splice(fromIndex, 1);
-                    criteriaItems.splice(toIndex, 0, moved);
-                    renderCriteriaItems();
-                });
-
-                dragHandle.addEventListener('keydown', (event) => {
-                    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
-                    event.preventDefault();
-
-                    const currentIndex = criteriaItems.findIndex(ci => ci.id === item.id);
-                    if (currentIndex < 0) return;
-
-                    const targetIndex = event.key === 'ArrowUp' ? currentIndex - 1 : currentIndex + 1;
-                    if (targetIndex < 0 || targetIndex >= criteriaItems.length) return;
-
-                    const [moved] = criteriaItems.splice(currentIndex, 1);
-                    criteriaItems.splice(targetIndex, 0, moved);
-                    renderCriteriaItems();
-
-                    requestAnimationFrame(() => {
-                        const nextHandle = panel.querySelector(`.zh-drag-handle[data-item-id="${item.id}"]`);
-                        if (nextHandle) nextHandle.focus();
-                    });
-                });
-
-                criteriaListEl.appendChild(row);
-            });
-
-            updateScoreSumHint();
-        }
-
-        renderCriteriaItems();
-        updateNameModeButtonText();
-
-        if (toggleNameModeBtn) {
-            toggleNameModeBtn.addEventListener('click', () => {
-                criteriaNameDisplayMode = criteriaNameDisplayMode === 'single-line' ? 'wrap' : 'single-line';
-                persistCriteriaNameDisplayMode(criteriaNameDisplayMode);
-                updateNameModeButtonText();
-                renderCriteriaItems();
-            });
-        }
-
-        window.addEventListener('resize', () => {
-            if (!document.body.contains(panel)) return;
-            renderCriteriaItems();
-        });
-
-        panel.querySelector('#zh-add-criterion-btn').addEventListener('click', () => {
-            criteriaItems.push({
-                id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                name: '',
-                score: 0
-            });
-            renderCriteriaItems();
-        });
-
-        panel.querySelector('#zh-cancel-analysis-btn').addEventListener('click', () => {
-            panel.remove();
-        });
-
-        const adviceEditor = panel.querySelector('#zh-grading-advice-editor');
-        const rtBoldBtn = panel.querySelector('#zh-rt-bold');
-        const rtListBtn = panel.querySelector('#zh-rt-list');
-        const rtTemplateBtn = panel.querySelector('#zh-rt-template');
-
-        function isSelectionInsideAdviceEditor() {
-            const selection = window.getSelection();
-            if (!selection || selection.rangeCount === 0) return false;
-            const range = selection.getRangeAt(0);
-            const commonNode = range.commonAncestorContainer;
-            return adviceEditor.contains(commonNode) || commonNode === adviceEditor;
-        }
-
-        function setCaretAfterNode(node) {
-            const range = document.createRange();
-            range.setStartAfter(node);
-            range.collapse(true);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-        }
-
-        function insertNodeAtCursor(node) {
-            adviceEditor.focus();
-            const tailNode = node instanceof DocumentFragment ? node.lastChild : node;
-            const selection = window.getSelection();
-            if (!selection || selection.rangeCount === 0 || !isSelectionInsideAdviceEditor()) {
-                adviceEditor.appendChild(node);
-                if (tailNode) setCaretAfterNode(tailNode);
-                return;
-            }
-
-            const range = selection.getRangeAt(0);
-            range.deleteContents();
-            range.insertNode(node);
-            if (tailNode) setCaretAfterNode(tailNode);
-        }
-
-        function wrapSelectionWithTag(tagName) {
-            adviceEditor.focus();
-            const selection = window.getSelection();
-            if (!selection || selection.rangeCount === 0 || !isSelectionInsideAdviceEditor()) {
-                const node = document.createElement(tagName);
-                node.textContent = '加粗文本';
-                insertNodeAtCursor(node);
-                return;
-            }
-
-            const range = selection.getRangeAt(0);
-            if (range.collapsed) {
-                const node = document.createElement(tagName);
-                node.textContent = '加粗文本';
-                range.insertNode(node);
-                setCaretAfterNode(node);
-                return;
-            }
-
-            const wrapper = document.createElement(tagName);
-            wrapper.appendChild(range.extractContents());
-            range.insertNode(wrapper);
-            setCaretAfterNode(wrapper);
-        }
-
-        function insertUnorderedList() {
-            adviceEditor.focus();
-            const selection = window.getSelection();
-            let selectedText = '';
-            if (selection && selection.rangeCount > 0 && isSelectionInsideAdviceEditor()) {
-                selectedText = selection.toString();
-            }
-
-            const lines = (selectedText || '')
-                .split(/\n+/)
-                .map(line => line.trim())
-                .filter(Boolean);
-            const finalLines = lines.length > 0 ? lines : ['列表项'];
-
-            const ul = document.createElement('ul');
-            ul.style.margin = '0 0 0 18px';
-            ul.style.padding = '0';
-            finalLines.forEach(line => {
-                const li = document.createElement('li');
-                li.textContent = line;
-                ul.appendChild(li);
-            });
-
-            insertNodeAtCursor(ul);
-        }
-
-        function insertTemplateText() {
-            const template = '【评语模板】\n- 优点：\n- 可改进点：\n- 建议：';
-            const frag = document.createDocumentFragment();
-            const lines = template.split('\n');
-            lines.forEach((line, idx) => {
-                if (idx > 0) frag.appendChild(document.createElement('br'));
-                frag.appendChild(document.createTextNode(line));
-            });
-            insertNodeAtCursor(frag);
-        }
-
-        [rtBoldBtn, rtListBtn, rtTemplateBtn].forEach(btn => {
-            btn.addEventListener('mousedown', (event) => event.preventDefault());
-        });
-
-        rtBoldBtn.addEventListener('click', () => wrapSelectionWithTag('strong'));
-        rtListBtn.addEventListener('click', () => insertUnorderedList());
-        rtTemplateBtn.addEventListener('click', () => insertTemplateText());
-
-        panel.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape') {
-                event.preventDefault();
-                closePanel();
-                return;
-            }
-            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-                event.preventDefault();
-                if (saveAnalysisBtn) saveAnalysisBtn.click();
-            }
-        });
-
-        panel.querySelector('#zh-save-analysis-btn').addEventListener('click', () => {
-            appLogger.info('💾 [评分标准] 开始保存...');
-
-            const homeworkType = panel.querySelector('#zh-homework-type').value.trim();
-            const typeExplanation = panel.querySelector('#zh-type-explanation').value.trim();
-            const gradingAdviceRich = adviceEditor.innerHTML.trim();
-            const gradingAdvice = adviceEditor.innerText.trim();
-
-            const normalizedCriteriaItems = criteriaItems
-                .map(item => ({
-                    name: (item.name || '').trim(),
-                    score: normalizeScore(item.score)
-                }))
-                .filter(item => item.name.length > 0);
-
-            if (!homeworkType) {
-                showNotification('⚠️ 请填写作业类型', '#FF9800');
-                panel.querySelector('#zh-homework-type').focus();
-                return;
-            }
-
-            if (normalizedCriteriaItems.length === 0) {
-                showNotification('⚠️ 请至少添加一条评分标准', '#FF9800');
-                return;
-            }
-
-            const scoreTotal = normalizedCriteriaItems.reduce((sum, item) => sum + item.score, 0);
-            const gradingCriteria = normalizedCriteriaItems.map(item => `${item.name}（${item.score}分）`);
-
-            AUTO_GRADING_STATE.autoGradingConditions = migrateAutoGradingConditions({
-                gradingCriteria,
-                gradingCriteriaItems: normalizedCriteriaItems,
-                gradingAdvice,
-                gradingAdviceRich,
-                commonMistakes: Array.isArray(analysis.commonMistakes) ? analysis.commonMistakes : [],
-                homeworkType,
-                typeExplanation,
-                isSet: true
-            });
-
-            persistManualCriteriaConditions();
-
-            appLogger.info('✅ [评分标准] 保存成功:', AUTO_GRADING_STATE.autoGradingConditions);
-
-            if (scoreTotal !== 100) {
-                showNotification(`✅ 已保存（当前总分 ${scoreTotal}）`, '#4CAF50');
-            } else {
-                showNotification('✅ 评分标准已保存！自动批改时将使用这些标准', '#4CAF50');
-            }
-
-            panel.remove();
-        });
-        
-        appLogger.info('✅ [作业分析] 面板已显示，等待用户编辑...');
-    }
+    // showAnalysisPanel 已提取到 src/content/content-analysis.js
     
     // ==========================================
     // 9.一键催交功能
@@ -6354,35 +6249,51 @@ window.addEventListener('unhandledrejection', (e) => {
         appLogger.info('🔍 [一键催交] 开始检测未交作业的学生...');
         
         const allUnsubmittedStudents = [];
+        const studentIdSet = new Set(); // 用学号去重
+        const studentNameSet = new Set(); // 如果没有学号，用姓名去重
         
         // 1. 获取总页数
         const totalPages = getTotalPages();
-        appLogger.debug(`📄 [一键催交] 总页数: ${totalPages}`);
+        appLogger.info(`📄 [一键催交] 总页数: ${totalPages}`);
         
         // 2. 遍历每一页
         for (let page = 1; page <= totalPages; page++) {
-            appLogger.debug(`\n📖 [一键催交] 正在扫描第 ${page} 页...`);
+            appLogger.info(`\n📖 [一键催交] 正在扫描第 ${page}/${totalPages} 页...`);
             
             // 如果不是第一页，需要点击翻页
             if (page > 1) {
                 await goToPage(page);
-                await new Promise(resolve => setTimeout(resolve, 1500)); // 等待页面加载
+                // goToPage 已包含智能等待，不需要额外延迟
             }
             
             // 提取当前页未交作业的学生
             const studentsOnPage = extractUnsubmittedStudentsFromCurrentPage();
-            allUnsubmittedStudents.push(...studentsOnPage);
             
-            appLogger.debug(`✅ [一键催交] 第 ${page} 页找到 ${studentsOnPage.length} 个未交作业的学生`);
+            // 去重：只添加之前没有见过的学生
+            let newStudents = 0;
+            for (const student of studentsOnPage) {
+                const uniqueKey = student.id !== '未知' ? student.id : student.name;
+                const checkSet = student.id !== '未知' ? studentIdSet : studentNameSet;
+                
+                if (!checkSet.has(uniqueKey)) {
+                    checkSet.add(uniqueKey);
+                    allUnsubmittedStudents.push(student);
+                    newStudents++;
+                }
+            }
+            
+            appLogger.info(`✅ [一键催交] 第 ${page} 页找到 ${studentsOnPage.length} 个学生，新增 ${newStudents} 个（去重后）`);
         }
         
-        appLogger.info(`✅ [一键催交] 共检测到 ${allUnsubmittedStudents.length} 个未交作业的学生`);
+        appLogger.info(`✅ [一键催交] 共检测到 ${allUnsubmittedStudents.length} 个未交作业的学生（已去重）`);
         return allUnsubmittedStudents;
     }
     
     // 从当前页面提取未交作业的学生
     function extractUnsubmittedStudentsFromCurrentPage() {
         const unsubmittedList = [];
+        
+        appLogger.info('🔍 [催交识别] 开始扫描当前页...');
         
         // 尝试多个选择器来找到学生行
         let rows = document.querySelectorAll('tbody tr.el-table__row');
@@ -6396,77 +6307,129 @@ window.addEventListener('unhandledrejection', (e) => {
         }
         
         if (rows.length === 0) {
+            appLogger.warn('⚠️ [催交识别] 未找到学生行！尝试的选择器都无效');
+            appLogger.warn('  - tbody tr.el-table__row: 0');
+            appLogger.warn('  - table tbody tr: 0');
+            appLogger.warn('  - [class*="el-table__row"]: 0');
             return unsubmittedList;
         }
         
+        appLogger.info(`📊 [催交识别] 找到 ${rows.length} 行学生数据，开始逐行分析...`);
+        
         rows.forEach((row, index) => {
             try {
-                // 提取学生名字
-                let nameCell = row.querySelector('.el-table_1_column_3');
-                let studentName = nameCell ? nameCell.textContent.trim() : null;
-                
-                if (!studentName) {
-                    const tds = row.querySelectorAll('td');
-                    if (tds.length >= 3) {
-                        studentName = tds[2].textContent.trim();
-                    }
-                }
-                
-                if (!studentName) {
+                const tds = row.querySelectorAll('td');
+                if (tds.length === 0) {
                     return;
                 }
                 
-                // 提取学号
-                let idCell = row.querySelector('.el-table_1_column_4');
-                let studentId = idCell ? idCell.textContent.trim() : null;
-                
-                if (!studentId) {
-                    const tds = row.querySelectorAll('td');
-                    if (tds.length >= 4) {
-                        studentId = tds[3].textContent.trim();
-                    }
+                // 对前3行详细输出，帮助调试
+                if (index < 3) {
+                    appLogger.info(`\n🔍 [行${index}示例] 共 ${tds.length} 列:`);
+                    tds.forEach((td, colIdx) => {
+                        const text = td.textContent.trim();
+                        if (text && text.length < 50) {
+                            appLogger.info(`  列${colIdx}: ${text}`);
+                        }
+                    });
                 }
                 
-                // 获取操作列按钮
+                // 提取学生信息（更灵活的方式）
+                let studentName = null;
+                let studentId = null;
                 let actionBtn = null;
-                let actionCell = row.querySelector('.el-table_1_column_9');
-                if (actionCell) {
-                    actionBtn = actionCell.querySelector('[class*=\"cursor-pointer\"]');
-                    if (!actionBtn) {
-                        actionBtn = actionCell.querySelector('span');
-                    }
-                }
+                let hasUnsubmitted = false;
                 
-                if (!actionBtn) {
-                    const tds = row.querySelectorAll('td');
-                    if (tds.length >= 9) {
-                        const lastCell = tds[8];
-                        actionBtn = lastCell.querySelector('span');
-                        if (!actionBtn) {
-                            actionBtn = lastCell.querySelector('div');
+                // 遍历所有单元格，找到关键信息
+                tds.forEach((td, colIndex) => {
+                    const text = td.textContent.trim();
+                    
+                    // 查找"未交"文本（红色的未交状态）
+                    if (text === '未交') {
+                        hasUnsubmitted = true;
+                        if (index < 3) appLogger.info(`  ✓ 列${colIndex}: 发现"未交"标记`);
+                    }
+                    
+                    // 查找操作按钮（"催交"链接）优先级顺序：
+                    // 1. base-button-component（正确的催交按钮）
+                    let btn = td.querySelector('.base-button-component');
+                    
+                    // 2. 其他可能的按钮元素
+                    if (!btn) {
+                        btn = td.querySelector('span[class*="cursor-pointer"], span[class*="color"], button, a');
+                    }
+                    
+                    // 3. 如果没有子元素，但td本身文本是"催交"，则使用td作为按钮
+                    if (!btn && text === '催交') {
+                        btn = td;
+                        if (index < 3) appLogger.info(`  ✓ 列${colIndex}: 发现"催交"单元格（使用td作为按钮）`);
+                    }
+                    
+                    if (btn) {
+                        const btnText = btn.textContent.trim();
+                        if (btnText === '催交') {
+                            actionBtn = btn;
+                            hasUnsubmitted = true;
+                            if (index < 3) appLogger.info(`  ✓ 列${colIndex}: 发现"催交"按钮 (${btn.className || 'td元素'})`);
+                        }
+                    }
+                    
+                    // 简单的学号识别（纯数字，长度6-15位）
+                    if (!studentId && /^\d{6,15}$/.test(text)) {
+                        studentId = text;
+                        if (index < 3) appLogger.info(`  ✓ 列${colIndex}: 学号 = ${studentId}`);
+                    }
+                    
+                    // 学生姓名（中文2-4个字，不包含数字和特殊字符）
+                    if (!studentName && /^[\u4e00-\u9fa5]{2,4}$/.test(text)) {
+                        studentName = text;
+                        if (index < 3) appLogger.info(`  ✓ 列${colIndex}: 姓名 = ${studentName}`);
+                    }
+                });
+                
+                // 如果没有找到姓名和学号，使用位置推断（兜底逻辑）
+                if (!studentName && tds.length >= 2) {
+                    // 姓名通常在第1或第2列
+                    for (let i = 0; i < Math.min(3, tds.length); i++) {
+                        const text = tds[i].textContent.trim();
+                        if (/^[\u4e00-\u9fa5]{2,4}$/.test(text)) {
+                            studentName = text;
+                            if (index < 3) appLogger.info(`  ⚠️ 位置推断姓名(列${i}): ${studentName}`);
+                            break;
                         }
                     }
                 }
                 
-                // 检查是否是"催交"状态
-                if (actionBtn) {
-                    const actionText = actionBtn.textContent.trim();
-                    if (actionText === '催交') {
-                        unsubmittedList.push({
-                            index: index,
-                            name: studentName,
-                            id: studentId,
-                            element: row,
-                            actionBtn: actionBtn
-                        });
-                        appLogger.debug(`📝 [一键催交] 找到未交作业学生: ${studentName} (${studentId})`);
+                if (!studentId && tds.length >= 3) {
+                    // 学号通常在第2或第3列
+                    for (let i = 1; i < Math.min(4, tds.length); i++) {
+                        const text = tds[i].textContent.trim();
+                        if (/^\d{6,15}$/.test(text)) {
+                            studentId = text;
+                            if (index < 3) appLogger.info(`  ⚠️ 位置推断学号(列${i}): ${studentId}`);
+                            break;
+                        }
                     }
                 }
+                
+                // 判断是否未交
+                if (hasUnsubmitted && studentName) {
+                    unsubmittedList.push({
+                        index: index,
+                        name: studentName,
+                        id: studentId || '未知',
+                        element: row,
+                        actionBtn: actionBtn
+                    });
+                    appLogger.info(`✅ [催交识别] 第${index}行: ${studentName} (${studentId || '未知'}) - 未交`);
+                }
+                
             } catch (error) {
-                console.error(`❌ [一键催交] 解析学生行 ${index} 失败:`, error);
+                console.error(`❌ [催交识别] 解析第 ${index} 行失败:`, error);
             }
         });
         
+        appLogger.info(`✅ [催交识别] 扫描完成，找到 ${unsubmittedList.length} 个未交学生`);
         return unsubmittedList;
     }
     
@@ -6474,9 +6437,54 @@ window.addEventListener('unhandledrejection', (e) => {
     async function executeOneClickRemind(studentList) {
         appLogger.info('🚀 [一键催交] 开始催交流程...');
         
+            // 控制变量
+            let isPaused = false;
+            let isStopped = false;
+            let currentIndex = 0;  // 添加索引追踪变量
+        
         showFloatingPanel('批量催交进行中', '#FF9800', buildRemindProgressPanelHTML());
         
+                // 绑定暂停/继续按钮
+                const pauseBtn = document.getElementById('zh-remind-pause-btn');
+                const stopBtn = document.getElementById('zh-remind-stop-btn');
+        
+                if (pauseBtn) {
+                    pauseBtn.addEventListener('click', () => {
+                        isPaused = !isPaused;
+                        if (isPaused) {
+                            pauseBtn.textContent = '▶ 继续';
+                            pauseBtn.style.background = '#4CAF50';
+                            appLogger.info('⏸ [一键催交] 已暂停');
+                        } else {
+                            pauseBtn.textContent = '⏸ 暂停';
+                            pauseBtn.style.background = '#FF9800';
+                            appLogger.info('▶ [一键催交] 继续执行');
+                        }
+                    });
+                }
+        
+                if (stopBtn) {
+                    stopBtn.addEventListener('click', () => {
+                        isStopped = true;
+                        appLogger.info('⏹ [一键催交] 用户停止催交');
+                    });
+                }
+        
         for (let i = 0; i < studentList.length; i++) {
+            currentIndex = i;  // 更新当前索引
+                        // 检查是否停止
+                        if (isStopped) {
+                            appLogger.info('⏹ [一键催交] 流程已停止');
+                            break;
+                        }
+            
+                        // 检查是否暂停
+                        while (isPaused && !isStopped) {
+                            await new Promise(resolve => setTimeout(resolve, CONFIRM_POLL_INTERVAL_MS));
+                        }
+            
+                        if (isStopped) break;
+            
             const student = studentList[i];
             const progress = `${i + 1}/${studentList.length} - ${student.name}`;
             
@@ -6485,27 +6493,181 @@ window.addEventListener('unhandledrejection', (e) => {
             
             try {
                 // 滚动到元素可见位置
-                student.row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                student.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 
                 // 等待滚动完成
                 await new Promise(resolve => setTimeout(resolve, 300));
                 
-                // 点击催交按钮
-                appLogger.debug(`📢 [一键催交] 点击 ${student.name} 的催交按钮`);
-                student.actionBtn.click();
-                
-                // 等待催交弹窗出现并自动处理
-                await new Promise(resolve => setTimeout(resolve, 800));
-                
-                // 检查并关闭催交确认弹窗（如果有的话）
-                const confirmBtn = document.querySelector('.el-message-box__btns button.el-button--primary');
-                if (confirmBtn) {
-                    appLogger.debug(`✅ [一键催交] 确认催交 ${student.name}`);
-                    confirmBtn.click();
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                // 点击催交按钮（如果有的话）
+                if (student.actionBtn) {
+                    appLogger.info(`📢 [一键催交] 点击 ${student.name} 的催交按钮`);
+                    appLogger.info(`🔍 [一键催交] 催交按钮类型: ${student.actionBtn.className || student.actionBtn.tagName}`);
+                    student.actionBtn.click();
+                    
+                    // 智能等待催交确认弹窗出现（轮询检测，最多等5秒）
+                    appLogger.info(`⏳ [一键催交] 等待确认弹窗...`);
+                    let confirmBtn = null;
+                    let attempts = 0;
+                    const maxAttempts = CONFIRM_MAX_ATTEMPTS;
+
+                    while (!confirmBtn && attempts < maxAttempts) {
+                        await new Promise(resolve => setTimeout(resolve, CONFIRM_POLL_INTERVAL_MS));
+                        attempts++;
+                        
+                        // 每5次尝试输出一次调试信息
+                        if (attempts % 5 === 0) {
+                            appLogger.info(`🔍 [一键催交] 第${attempts}次检测...`);
+                            
+                            // 查找所有可能的对话框元素
+                            const messageBox = document.querySelector('.el-message-box');
+                            const overlay = document.querySelector('.v-modal, .el-popup-parent--hidden, [class*="overlay"]');
+                            
+                            if (messageBox) {
+                                const visible = window.getComputedStyle(messageBox).display !== 'none';
+                                const opacity = window.getComputedStyle(messageBox).opacity;
+                                const allButtons = messageBox.querySelectorAll('button, .base-button-component');
+                                const innerText = messageBox.textContent?.trim().substring(0, 50);
+                                appLogger.info(`  📦 MessageBox: 可见=${visible}, 透明度=${opacity}, 按钮数=${allButtons.length}`);
+                                appLogger.info(`  📝 内容: ${innerText}...`);
+                                
+                                // 输出所有按钮的信息
+                                allButtons.forEach((btn, i) => {
+                                    appLogger.info(`    - 按钮${i}: "${btn.textContent.trim()}" tag=${btn.tagName} class="${btn.className}"`);
+                                });
+                            } else {
+                                appLogger.info(`  ❌ 未找到 .el-message-box`);
+                                
+                                // 如果没有MessageBox，检查是否有base-button-component确认按钮
+                                if (attempts === 5) {
+                                    const baseBtns = document.querySelectorAll('.base-button-component');
+                                    appLogger.info(`  🔍 全局找到 ${baseBtns.length} 个base-button-component:`);
+                                    Array.from(baseBtns).slice(0, 5).forEach((btn, i) => {
+                                        const visible = window.getComputedStyle(btn).display !== 'none';
+                                        appLogger.info(`    - ${i}: "${btn.textContent.trim()}" visible=${visible} class="${btn.className}"`);
+                                    });
+                                }
+                            }
+                            
+                            if (overlay) {
+                                appLogger.info(`  🎭 遮罩层存在: ${overlay.className}`);
+                            }
+                        }
+                        
+                        // 尝试1：查找 .el-message-box 容器（优先）
+                        const messageBox = document.querySelector('.el-message-box');
+                        if (messageBox) {
+                            const boxStyle = window.getComputedStyle(messageBox);
+                            // 确认弹窗可见
+                            if (boxStyle.display !== 'none' && boxStyle.visibility !== 'hidden' && boxStyle.opacity !== '0') {
+                                // 在弹窗内查找所有按钮（包括 button 和 div.base-button-component）
+                                const buttons = messageBox.querySelectorAll('button, .base-button-component');
+                                
+                                // 首次检测时输出所有按钮信息
+                                if (attempts === 1 && buttons.length > 0) {
+                                    appLogger.info(`🔍 [一键催交] MessageBox内找到 ${buttons.length} 个按钮:`);
+                                    buttons.forEach((btn, i) => {
+                                        const btnVisible = window.getComputedStyle(btn).display !== 'none';
+                                        appLogger.info(`  - 按钮${i}: "${btn.textContent.trim()}" visible=${btnVisible} tag=${btn.tagName} class="${btn.className}"`);
+                                    });
+                                }
+                                
+                                for (const btn of buttons) {
+                                    const btnStyle = window.getComputedStyle(btn);
+                                    if (btnStyle.display === 'none' || btnStyle.visibility === 'hidden') continue;
+                                    
+                                    const btnText = btn.textContent.trim();
+                                    // 优先匹配"确定"、"确认"
+                                    if (btnText === '确定' || btnText === '确认' || btnText === 'OK' || btnText === '是') {
+                                        confirmBtn = btn;
+                                        appLogger.info(`🎯 [一键催交] 在MessageBox中找到确认按钮: "${btnText}" tag=${btn.tagName} class="${btn.className}"`);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // 尝试2：直接查找 base-button-component 确认按钮
+                        if (!confirmBtn) {
+                            const baseBtns = document.querySelectorAll('.base-button-component');
+                            for (const btn of baseBtns) {
+                                const btnStyle = window.getComputedStyle(btn);
+                                if (btnStyle.display === 'none' || btnStyle.visibility === 'hidden') continue;
+                                
+                                const btnText = btn.textContent.trim();
+                                if (btnText === '确定' || btnText === '确认') {
+                                    confirmBtn = btn;
+                                    appLogger.info(`🎯 [一键催交] 找到base-button确认按钮: "${btnText}"`);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // 尝试3：Element UI 标准确认按钮
+                        if (!confirmBtn) {
+                            confirmBtn = document.querySelector('.el-message-box__btns button.el-button--primary');
+                        }
+                        
+                        // 尝试4：Element UI 次要按钮（可能是主按钮）
+                        if (!confirmBtn) {
+                            confirmBtn = document.querySelector('.el-message-box__btns button.el-button');
+                        }
+                        
+                        // 尝试5：所有可见的确认类按钮（全局搜索，包括button和div）
+                        if (!confirmBtn) {
+                            const buttons = document.querySelectorAll('button, .base-button-component');
+                            for (const btn of buttons) {
+                                // 检查按钮及其父元素的可见性
+                                const btnStyle = window.getComputedStyle(btn);
+                                if (btnStyle.display === 'none' || btnStyle.visibility === 'hidden') continue;
+                                
+                                // 检查父元素是否可见
+                                let parent = btn.parentElement;
+                                let isVisible = true;
+                                while (parent && parent !== document.body) {
+                                    const parentStyle = window.getComputedStyle(parent);
+                                    if (parentStyle.display === 'none' || parentStyle.visibility === 'hidden') {
+                                        isVisible = false;
+                                        break;
+                                    }
+                                    parent = parent.parentElement;
+                                }
+                                if (!isVisible) continue;
+                                
+                                const btnText = btn.textContent.trim();
+                                if (btnText === '确认' || btnText === '确定' || btnText === 'OK' || btnText === '是') {
+                                    confirmBtn = btn;
+                                    appLogger.info(`🔍 [一键催交] 找到匹配按钮: "${btnText}" (${btn.className})`);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (confirmBtn) {
+                            appLogger.info(`✅ [一键催交] 找到确认按钮 (尝试${attempts}次，耗时${attempts * 200}ms)`);
+                            break;
+                        }
+                    }
+                    
+                    if (confirmBtn) {
+                        appLogger.info(`📌 [一键催交] 点击确认按钮催交 ${student.name}`);
+                        confirmBtn.click();
+                        await new Promise(resolve => setTimeout(resolve, 800));
+                    } else {
+                        appLogger.warn(`⚠️ [一键催交] 等待${attempts * 200}ms后未找到确认按钮，可能已自动确认或弹窗未出现`);
+                        // 输出当前页面所有可见按钮用于调试（包括button和div按钮）
+                        const allButtons = document.querySelectorAll('button, .base-button-component');
+                        const visibleButtons = Array.from(allButtons).filter(btn => {
+                            return window.getComputedStyle(btn).display !== 'none';
+                        }).map(btn => `"${btn.textContent.trim()}"(${btn.tagName}:${btn.className})`);
+                        appLogger.warn(`📊 [一键催交] 当前页面可见按钮: ${visibleButtons.slice(0, 10).join(', ')}`);
+                        // 即使没找到确认按钮也继续，可能系统已自动确认
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+                    
+                    appLogger.info(`✅ [一键催交] ${student.name} 催交完成`);
+                } else {
+                    appLogger.warn(`⚠️ [一键催交] ${student.name} 没有找到催交按钮，跳过`);
                 }
-                
-                appLogger.info(`✅ [一键催交] ${student.name} 催交完成`);
                 
             } catch (error) {
                 console.error(`❌ [一键催交] ${student.name} 催交失败:`, error);
@@ -6517,8 +6679,14 @@ window.addEventListener('unhandledrejection', (e) => {
         
         // 完成
         closePanelIfExists();
-        showNotification(`✅ 已完成 ${studentList.length} 位学生的催交！`, '#4CAF50');
-        appLogger.info('🎉 [一键催交] 流程完成！');
+        if (isStopped) {
+            const completed = Math.min(currentIndex + 1, studentList.length);
+            showNotification(`⏹ 催交已停止，完成 ${completed} / ${studentList.length} 位学生`, '#FF9800');
+            appLogger.info(`⏹ [一键催交] 流程已停止，完成 ${completed}/${studentList.length}`);
+        } else {
+            showNotification(`✅ 已完成 ${studentList.length} 位学生的催交！`, '#4CAF50');
+            appLogger.info('🎉 [一键催交] 流程完成！');
+        }
     }
     
     // 更新催交进度条
@@ -6566,30 +6734,24 @@ window.addEventListener('unhandledrejection', (e) => {
         return true;
     }
     
-    // 监听页面动态变化（某些页面可能会动态加载学生列表）
-    function setupMutationObserver() {
-        appLogger.debug('👁️ [MutationObserver] 开始监听页面变化...');
-        
-        const observer = new MutationObserver((mutations) => {
-            // 每 2 秒检查一次是否需要创建按钮
-            // 这样可以处理动态加载的学生列表
-        });
-        
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: false,
-            characterData: false
-        });
-        
-        // 同时设置定期检查
-        setInterval(() => {
+    // 定期检查悬浮球是否存在，若被外部移除则重新创建
+    let _ballCheckIntervalId = null;
+    function setupFloatingBallGuard() {
+        if (_ballCheckIntervalId !== null) return; // 防止重复注册
+        _ballCheckIntervalId = setInterval(() => {
             const hasBall = document.getElementById('zhihuishu-ai-floating-ball');
             if (!hasBall) {
                 appLogger.debug('🔄 [定期检查] 悬浮图标不存在，重新创建...');
                 createFloatingBall();
             }
         }, 5000);
+    }
+
+    function teardownFloatingBallGuard() {
+        if (_ballCheckIntervalId !== null) {
+            clearInterval(_ballCheckIntervalId);
+            _ballCheckIntervalId = null;
+        }
     }
     
     // 页面加载完毕后创建自动批改按钮
@@ -6608,6 +6770,7 @@ window.addEventListener('unhandledrejection', (e) => {
         
         // 始终创建浮窗球（所有页面都需要）
         createFloatingBall();
+        setupFloatingBallGuard();
         appLogger.info('✅ [初始化] 浮窗球已创建');
         
         // 创建独立的暂停按钮（所有页面都需要）
@@ -6631,6 +6794,11 @@ window.addEventListener('unhandledrejection', (e) => {
         
         appLogger.info('✅ [初始化] 检测到学生列表页面，菜单已就绪');
         appLogger.info('✅ [初始化] 初始化完成');
+
+        // 初始化后尝试恢复待执行任务（从主页自动跳转过来时）
+        setTimeout(() => {
+            resumePendingTaskIfNeeded();
+        }, 600);
         
         } catch (error) {
             appLogger.error('❌ [初始化] 初始化过程出错:', error);
@@ -6650,9 +6818,16 @@ window.addEventListener('unhandledrejection', (e) => {
         initAutoGradingFeature();
     }
 
+    // 无论是否是作业页，都尝试一次任务恢复，兼容SPA页面
+    setTimeout(() => {
+        resumePendingTaskIfNeeded();
+    }, 1200);
+
     } catch (error) {
         console.error('❌ [Content Script] 整体执行出错:', error);
         console.debug('❌ [Content Script] 错误堆栈:', error.stack);
     }
 
 })();
+
+
