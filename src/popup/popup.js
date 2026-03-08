@@ -1,11 +1,26 @@
 console.log('popup脚本开始执行');
 
+// 单例模式：防止重复初始化导致事件监听器堆积
+let popupInitialized = false;
+
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM加载完成');
+    // 防止重复初始化
+    if (popupInitialized) {
+        console.warn('⚠️ [Popup] 已初始化过，跳过重复初始化');
+        return;
+    }
+    popupInitialized = true;
+    console.log('DOM加载完成，开始初始化popup');
+    
+    // 记录初始化时间，用于调试
+    const initTime = new Date().toISOString();
+    console.debug(`✅ [Popup] 第一次初始化: ${initTime}`);
+
     
     const status = document.getElementById('status');
     const includeReviewedCheckbox = document.getElementById('include-reviewed-checkbox');
     const showRuleBreakdownCheckbox = document.getElementById('show-rule-breakdown-checkbox');
+    const autoExecutionModeSelect = document.getElementById('auto-execution-mode-select');
     const studentNameInput = document.getElementById('student-name-input');
     const autocompleteDropdown = document.getElementById('autocomplete-dropdown');
     const tabButtons = document.querySelectorAll('.tab-item[data-tab]');
@@ -19,6 +34,22 @@ document.addEventListener('DOMContentLoaded', function() {
     const refreshMetricsBtn = document.getElementById('refresh-metrics-btn');
     const clearMetricsBtn = document.getElementById('clear-metrics-btn');
     const runtimeMetricsSummary = document.getElementById('runtime-metrics-summary');
+    let actionInProgress = false;
+
+    function toReadableErrorMessage(error) {
+        const raw = String(error?.message || error || '').trim();
+        if (!raw) return '操作失败';
+
+        if (raw.includes('Receiving end does not exist') || raw.includes('Could not establish connection')) {
+            return '当前页面未注入插件脚本，请先打开智慧树作业页面后再试';
+        }
+
+        if (raw.includes('Cannot access a chrome://')) {
+            return '当前页面不支持执行该功能，请切换到智慧树页面';
+        }
+
+        return raw;
+    }
 
     function activateTab(tabName) {
         if (!tabName) return;
@@ -108,14 +139,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 chrome.tabs.sendMessage(tabs[0].id, message, function(response) {
                     if (chrome.runtime.lastError) {
                         console.error('发送消息失败:', chrome.runtime.lastError.message);
-                        reject(new Error(chrome.runtime.lastError.message));
+                        reject(new Error(toReadableErrorMessage(chrome.runtime.lastError)));
                         return;
                     }
-                    
+
                     if (response && response.success) {
                         resolve(response);
                     } else {
-                        reject(new Error(response?.error || '操作失败'));
+                        reject(new Error(toReadableErrorMessage(response?.error || '操作失败')));
                     }
                 });
             });
@@ -139,9 +170,15 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    function updateApiKeyMaskedText(maskedValue, hasApiKey) {
+    function updateApiKeyMaskedText(maskedValue, hasApiKey, isDefault = false) {
         if (!apiKeyMasked) return;
-        apiKeyMasked.textContent = hasApiKey ? `当前：${maskedValue}` : '当前：未设置';
+        if (!hasApiKey) {
+            apiKeyMasked.textContent = '当前：未设置';
+        } else if (isDefault) {
+            apiKeyMasked.textContent = `当前: ${maskedValue} (使用内置默认Key)`;
+        } else {
+            apiKeyMasked.textContent = `当前: ${maskedValue} (自定义Key)`;
+        }
     }
 
     async function initializeApiKeySettings() {
@@ -149,7 +186,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         try {
             const response = await sendMessageToBackground('getApiKeyConfig');
-            updateApiKeyMaskedText(response.maskedApiKey || '****', !!response.hasApiKey);
+            updateApiKeyMaskedText(response.maskedApiKey || '****', !!response.hasApiKey, response.isDefault);
             apiKeyInput.value = '';
         } catch (error) {
             console.warn('初始化 API Key 设置失败:', error.message);
@@ -192,37 +229,93 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // 添加功能按钮点击事件
     const rows = document.querySelectorAll('.feature-row');
+
+    function setActionBusyState(busy) {
+        actionInProgress = busy;
+        rows.forEach((row) => {
+            if (!row.classList.contains('settings-row') && row.dataset.action) {
+                row.classList.toggle('busy', busy);
+                row.setAttribute('aria-disabled', busy ? 'true' : 'false');
+            }
+        });
+    }
+
+    // 显示分阶段操作进度（各阶段立即显示，不添加人为等待）
+    async function showProgressPhases(phases) {
+        for (const phase of phases) {
+            setStatus(phase.message, phase.type || 'ok');
+            await new Promise(resolve => setTimeout(resolve, 30));
+        }
+    }
+
     rows.forEach(function(row) {
+        if (!row.classList.contains('settings-row') && row.dataset.action) {
+            row.setAttribute('role', 'button');
+            row.setAttribute('tabindex', '0');
+
+            row.addEventListener('keydown', function(e) {
+                if (e.target && e.target.closest('input, textarea, select, button')) {
+                    return;
+                }
+
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    row.click();
+                }
+            });
+        }
+
         row.addEventListener('click', async function(e) {
-            // 如果点击的是设置行或单人批改行，不处理（它们有自己的交互）
+            // 如果点击的是设置行，不处理（它们有自己的交互）
             if (row.classList.contains('settings-row')) {
                 return;
             }
-            
+
+            if (actionInProgress) {
+                setStatus('⏳ 当前操作尚未完成，请稍候...', 'warn');
+                return;
+            }
+
             const action = row.getAttribute('data-action');
             console.log('点击功能:', action);
-            
+
             try {
+                setActionBusyState(true);
                 if (action === 'analyze') {
-                    setStatus('🔍 正在进行 AI 作业分析...', 'ok');
+                    await showProgressPhases([
+                        { message: '🔄 连接服务器...', type: 'ok', delay: 350 },
+                        { message: '📤 发送作业数据...', type: 'ok', delay: 380 },
+                        { message: '⏳ 等待 AI 分析...', type: 'ok', delay: 420 }
+                    ]);
                     await sendMessageToContent('triggerHomeworkAnalysis');
-                    setStatus('✅ AI 作业分析已启动', 'ok');
-                    
+                    setStatus('✅ 分析已启动', 'ok');
+
                 } else if (action === 'manual-criteria') {
-                    setStatus('✏️ 打开手动设置面板...', 'ok');
+                    await showProgressPhases([
+                        { message: '🔄 连接服务器...', type: 'ok', delay: 350 },
+                        { message: '📂 加载评分标准...', type: 'ok', delay: 420 }
+                    ]);
                     await sendMessageToContent('triggerManualCriteria');
                     setStatus('✅ 已打开手动设置面板', 'ok');
-                    
+
                 } else if (action === 'auto-grade') {
-                    setStatus('🎯 正在启动自动批改...', 'ok');
+                    await showProgressPhases([
+                        { message: '🔄 连接服务器...', type: 'ok', delay: 350 },
+                        { message: '📤 发送作业数据...', type: 'ok', delay: 380 },
+                        { message: '⏳ 等待 AI 批改...', type: 'ok', delay: 420 }
+                    ]);
                     await sendMessageToContent('triggerAutoGrading');
                     setStatus('✅ 自动批改已启动', 'ok');
-                    
+
                 } else if (action === 'remind') {
-                    setStatus('📢 正在启动一键催交...', 'ok');
+                    await showProgressPhases([
+                        { message: '🔄 连接服务器...', type: 'ok', delay: 350 },
+                        { message: '📝 准备催交消息...', type: 'ok', delay: 380 },
+                        { message: '⏳ 发送中...', type: 'ok', delay: 420 }
+                    ]);
                     await sendMessageToContent('triggerOneClickRemind');
                     setStatus('✅ 一键催交已启动', 'ok');
-                    
+
                 } else if (action === 'single-student') {
                     const studentName = studentNameInput.value.trim();
                     if (!studentName) {
@@ -230,18 +323,24 @@ document.addEventListener('DOMContentLoaded', function() {
                         studentNameInput.focus();
                         return;
                     }
-                    
-                    setStatus(`👤 正在批改学生: ${studentName}...`, 'ok');
+
+                    await showProgressPhases([
+                        { message: '🔄 连接服务器...', type: 'ok', delay: 350 },
+                        { message: `📤 发送 ${studentName} 的作业数据...`, type: 'ok', delay: 380 },
+                        { message: `⏳ 等待 AI 批改 ${studentName}...`, type: 'ok', delay: 420 }
+                    ]);
                     await sendMessageToContent('triggerSingleStudent', { studentName });
-                    setStatus(`✅ 已开始批改学生: ${studentName}`, 'ok');
+                    setStatus(`✅ 已开始批改 ${studentName}`, 'ok');
                     studentNameInput.value = '';
-                    
+
                 } else {
                     setStatus('⚠️ 未知功能', 'warn');
                 }
             } catch (error) {
                 console.error('操作失败:', error);
-                setStatus(`❌ ${error.message || '操作失败'}`, 'error');
+                setStatus(`❌ ${toReadableErrorMessage(error)}`, 'error');
+            } finally {
+                setActionBusyState(false);
             }
         });
     });
@@ -279,6 +378,23 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    if (autoExecutionModeSelect) {
+        autoExecutionModeSelect.addEventListener('change', async function(e) {
+            e.stopPropagation();
+            const mode = this.value;
+            console.log('切换自动执行模式:', mode);
+
+            try {
+                await sendMessageToContent('setAutoExecutionMode', { mode });
+                const label = mode === 'manual' ? '完全手动' : (mode === 'navigate_only' ? '仅自动跳转' : '自动跳转并自动执行');
+                setStatus(`✅ 自动执行模式已设为：${label}`, 'ok');
+            } catch (error) {
+                console.error('设置失败:', error);
+                setStatus('❌ 设置失败', 'error');
+            }
+        });
+    }
+
     async function initializeSettings() {
         try {
             const settings = await sendMessageToContent('getExtensionSettings');
@@ -287,6 +403,10 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             if (showRuleBreakdownCheckbox) {
                 showRuleBreakdownCheckbox.checked = settings.showRuleScoringBreakdown !== false;
+            }
+            if (autoExecutionModeSelect) {
+                const mode = settings.autoExecutionMode || (settings.autoModeEnabled === false ? 'manual' : 'full');
+                autoExecutionModeSelect.value = mode;
             }
         } catch (error) {
             console.warn('初始化设置失败:', error.message);
@@ -312,7 +432,7 @@ document.addEventListener('DOMContentLoaded', function() {
             saveApiKeyBtn.disabled = true;
             try {
                 const response = await sendMessageToBackground('setApiKeyConfig', { apiKey });
-                updateApiKeyMaskedText(response.maskedApiKey || '****', !!response.hasApiKey);
+                updateApiKeyMaskedText(response.maskedApiKey || '****', !!response.hasApiKey, response.isDefault);
                 apiKeyInput.value = '';
                 setStatus('✅ API Key 已安全保存', 'ok');
             } catch (error) {
@@ -473,14 +593,6 @@ document.addEventListener('DOMContentLoaded', function() {
         autocompleteDropdown.classList.add('show');
     }
     
-    // 显示加载中
-    function showAutocompleteLoading() {
-        if (!autocompleteDropdown) return;
-        
-        autocompleteDropdown.innerHTML = '<div class="autocomplete-loading">正在加载学生名单...</div>';
-        autocompleteDropdown.classList.add('show');
-    }
-    
     // 隐藏自动补全下拉列表
     function hideAutocomplete() {
         if (autocompleteDropdown) {
@@ -561,36 +673,6 @@ document.addEventListener('DOMContentLoaded', function() {
             hideAutocomplete();
         }
     });
-
-    // 输入框点击阻止冒泡（保留原有代码，上面已重写）
-    /* 已在上面实现
-    if (studentNameInput) {
-        studentNameInput.addEventListener('click', function(e) {
-            e.stopPropagation();
-        });
-        
-        // 回车触发批改
-        studentNameInput.addEventListener('keypress', async function(e) {
-            if (e.key === 'Enter') {
-                const studentName = this.value.trim();
-                if (!studentName) {
-                    setStatus('❌ 请输入学生姓名', 'error');
-                    return;
-                }
-                
-                try {
-                    setStatus(`👤 正在批改学生: ${studentName}...`, 'ok');
-                    await sendMessageToContent('triggerSingleStudent', { studentName });
-                    setStatus(`✅ 已开始批改学生: ${studentName}`, 'ok');
-                    this.value = '';
-                } catch (error) {
-                    console.error('操作失败:', error);
-                    setStatus(`❌ ${error.message || '操作失败'}`, 'error');
-                }
-            }
-        });
-    }
-    */
 
     setStatus('✅ 插件界面已就绪，请选择功能', 'ok');
     console.log('popup初始化完成');

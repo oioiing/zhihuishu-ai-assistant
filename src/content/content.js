@@ -2022,9 +2022,10 @@ window.addEventListener('unhandledrejection', (e) => {
                 const standard = standardLines[i].trim();
                 const student = studentLines[i].trim();
                 
-                // 精确匹配或包含匹配
-                if (standard.toLowerCase() === student.toLowerCase() || 
-                    student.toLowerCase().includes(standard.toLowerCase())) {
+                // 精确匹配，或标准答案≥3字符时允许学生答案包含标准答案（防止单字符假匹配）
+                const stdLow = standard.toLowerCase();
+                const stuLow = student.toLowerCase();
+                if (stdLow === stuLow || (stdLow.length >= 3 && stuLow.includes(stdLow))) {
                     correctCount++;
                 }
             }
@@ -2202,29 +2203,46 @@ window.addEventListener('unhandledrejection', (e) => {
         return Math.round(total);
     }
 
-    // 作文题评分逻辑（基于长度和关键词）
+    // 作文题评分逻辑（中英文分别计量 + 词汇多样性加分）
     function calculateScoreForEssay(studentAnswer, totalScore = 100) {
         appLogger.debug('📝 [作文评分] 开始评估作文质量...');
-        
+
         try {
-            const answerLength = (studentAnswer || '').trim().length;
-            
-            // 基于字数的粗算分数
-            let score = totalScore;
-            
-            if (answerLength < 50) {
-                score = 40; // 字数太少
-            } else if (answerLength < 100) {
-                score = 60; // 字数不足
-            } else if (answerLength < 200) {
-                score = 75; // 基本完整
-            } else if (answerLength < 300) {
-                score = 85; // 较为完整
+            const text = (studentAnswer || '').trim();
+
+            // 判断主语言：中文字符占比 > 30% 则视为中文作文
+            const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
+            const isChinese = text.length > 0 && chineseChars / text.length > 0.3;
+
+            let score;
+            if (isChinese) {
+                // 中文：按汉字数计量（一个汉字约等于一个词）
+                const charCount = chineseChars;
+                if (charCount < 30)       score = 40;
+                else if (charCount < 80)  score = 60;
+                else if (charCount < 150) score = 75;
+                else if (charCount < 250) score = 85;
+                else                      score = 90;
             } else {
-                score = 95; // 详细充分
+                // 英文：按单词数计量
+                const words = text.match(/\b[A-Za-z']+\b/g) || [];
+                const wordCount = words.length;
+                if (wordCount < 30)       score = 40;
+                else if (wordCount < 60)  score = 60;
+                else if (wordCount < 100) score = 75;
+                else if (wordCount < 150) score = 85;
+                else                      score = 90;
+
+                // 词汇多样性（type-token ratio）：unique词 / 总词 > 0.6 时加3分，> 0.75 加5分
+                if (wordCount >= 30) {
+                    const uniqueWords = new Set(words.map(w => w.toLowerCase())).size;
+                    const ttr = uniqueWords / wordCount;
+                    if (ttr > 0.75)      score = Math.min(totalScore, score + 5);
+                    else if (ttr > 0.6)  score = Math.min(totalScore, score + 3);
+                }
             }
-            
-            appLogger.info(`✅ [作文评分] 字数: ${answerLength}，评估分数: ${score}`);
+
+            appLogger.info(`✅ [作文评分] ${isChinese ? `汉字${chineseChars}个` : `单词${(text.match(/\b[A-Za-z']+\b/g) || []).length}个`}，评估分数: ${score}`);
             return score;
             
         } catch (error) {
@@ -4492,6 +4510,45 @@ window.addEventListener('unhandledrejection', (e) => {
         }
     }
 
+    // 替代浏览器原生 confirm()，在页面内显示非阻塞确认弹窗
+    function showInPageConfirm(message) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.45);z-index:2147483647;display:flex;align-items:center;justify-content:center;';
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = 'background:#fff;border-radius:12px;padding:24px 28px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.25);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+
+            const msgEl = document.createElement('p');
+            msgEl.style.cssText = 'margin:0 0 20px;font-size:14px;line-height:1.7;color:#1f2937;white-space:pre-line;';
+            msgEl.textContent = message;
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '取消';
+            cancelBtn.style.cssText = 'padding:8px 18px;border:1px solid #d1d5db;background:#fff;border-radius:6px;cursor:pointer;font-size:13px;color:#374151;';
+
+            const confirmBtn = document.createElement('button');
+            confirmBtn.textContent = '确认';
+            confirmBtn.style.cssText = 'padding:8px 18px;border:none;background:#3b82f6;color:#fff;border-radius:6px;cursor:pointer;font-size:13px;';
+
+            const close = (result) => { overlay.remove(); resolve(result); };
+            cancelBtn.onclick = () => close(false);
+            confirmBtn.onclick = () => close(true);
+            overlay.onclick = (e) => { if (e.target === overlay) close(false); };
+
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(confirmBtn);
+            dialog.appendChild(msgEl);
+            dialog.appendChild(btnRow);
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+            confirmBtn.focus();
+        });
+    }
+
     async function startAutoGradingFlow() {
         appLogger.info('🖱️ [自动批改] 开始批量自动批改');
         showNotification('🔍 正在扫描所有学生...', '#FF9800');
@@ -4518,7 +4575,7 @@ window.addEventListener('unhandledrejection', (e) => {
             return;
         }
 
-        const confirmed = confirm(`检测到 ${studentList.length} 个学生，即将开始自动批改，是否继续？\n\n⚠️ 请确保网络连接稳定，批改过程中请勿关闭页面。`);
+        const confirmed = await showInPageConfirm(`检测到 ${studentList.length} 个学生，即将开始自动批改，是否继续？\n\n⚠️ 请确保网络连接稳定，批改过程中请勿关闭页面。`);
         if (confirmed) {
             appLogger.info(`✅ [自动批改] 用户已确认，开始处理 ${studentList.length} 个学生`);
             
@@ -4573,14 +4630,14 @@ window.addEventListener('unhandledrejection', (e) => {
 
         if (targetList.length > 1) {
             const names = targetList.map((s) => s.name).join('、');
-            const confirmed = confirm(`匹配到多个学生：${names}\n\n是否只批改第一个：${targetList[0].name}？`);
+            const confirmed = await showInPageConfirm(`匹配到多个学生：${names}\n\n是否只批改第一个：${targetList[0].name}？`);
             if (!confirmed) {
                 return;
             }
             targetList = [targetList[0]];
         }
 
-        const confirmed = confirm(`即将批改：${targetList[0].name}\n\n确认开始吗？`);
+        const confirmed = await showInPageConfirm(`即将批改：${targetList[0].name}\n\n确认开始吗？`);
         if (!confirmed) {
             return;
         }
@@ -4619,7 +4676,7 @@ window.addEventListener('unhandledrejection', (e) => {
             return;
         }
 
-        const confirmed = confirm(`检测到 ${unsubmittedList.length} 位学生未交作业，是否批量催交？\n\n将依次点击每位学生的"催交"按钮`);
+        const confirmed = await showInPageConfirm(`检测到 ${unsubmittedList.length} 位学生未交作业，是否批量催交？\n\n将依次点击每位学生的"催交"按钮`);
         if (confirmed) {
             appLogger.info(`✅ [一键催交] 用户已确认，开始催交 ${unsubmittedList.length} 位学生`);
             // 扫描完成后，跳转回第一页再开始催交
