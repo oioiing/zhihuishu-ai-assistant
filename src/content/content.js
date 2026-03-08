@@ -35,9 +35,14 @@ window.addEventListener('unhandledrejection', (e) => {
 
     // ========== 工具函数 ==========
     function decodeBase64Param(param) {
-        const decoded = decodeURIComponent(param);
-        const padded = decoded + '='.repeat((4 - decoded.length % 4) % 4);
-        return atob(padded);
+        try {
+            const raw = decodeURIComponent(String(param || '').trim());
+            if (!raw) return '';
+            const padded = raw + '='.repeat((4 - raw.length % 4) % 4);
+            return atob(padded);
+        } catch (_) {
+            return '';
+        }
     }
 
     // ========== window.open拦截 - 捕获文件预览URL（避免打开新标签页）==========
@@ -1670,7 +1675,7 @@ window.addEventListener('unhandledrejection', (e) => {
             persisted[studentName].push(historyItem);
             localStorage.setItem('zhai_progress', JSON.stringify(persisted));
         } catch (e) {
-            console.warn('⚠️ [统计] 写入本地历史记录失败:', e.message);
+            appLogger.warn('[统计]', '⚠️ 写入本地历史记录失败:', e.message);
         }
     }
 
@@ -3646,10 +3651,9 @@ window.addEventListener('unhandledrejection', (e) => {
                 comment += '📈 长期改进方向：' + response.longTermHint + '\n\n';
             }
 
-            // 控制评语长度（约200词以内）
-            const words = comment.split(/\s+/);
-            if (words.length > 210) {
-                comment = words.slice(0, 210).join(' ');
+            // 控制评语长度（约600字以内，中英文通用）
+            if (comment.length > 620) {
+                comment = comment.slice(0, 600);
                 comment += '\n...';
             }
 
@@ -3658,8 +3662,8 @@ window.addEventListener('unhandledrejection', (e) => {
             return comment;
             
         } catch (error) {
-            console.error('❌ [评语生成] AI批改失败:', error);
-            appLogger.warn('⚠️ [评语生成] 回退到简单评语生成');
+            appLogger.error('[评语生成]', '❌ AI批改失败:', error);
+            appLogger.warn('[评语生成]', '⚠️ 回退到简单评语生成');
             
             // 回退到简单评语生成
             let comment = '';
@@ -3723,7 +3727,7 @@ window.addEventListener('unhandledrejection', (e) => {
                 return '大部分正确，个别小错误，注意细节！';
             }
         } catch (error) {
-            console.warn('⚠️ [自动批改] 解析答案失败，使用默认评语');
+            appLogger.warn('[自动批改]', '⚠️ 解析答案失败，使用默认评语');
             return score >= 80 ? '整体不错，继续努力！' : '存在部分错误，请仔细检查答案！';
         }
     }
@@ -4510,7 +4514,7 @@ window.addEventListener('unhandledrejection', (e) => {
         const studentList = await detectStudentList();
         if (studentList.length === 0) {
             showNotification('❌ 未检测到学生列表', '#FF5252');
-            console.error('❌ [自动批改] 未检测到学生');
+            appLogger.error('[自动批改]', '❌ 未检测到学生');
             return;
         }
 
@@ -4680,17 +4684,6 @@ window.addEventListener('unhandledrejection', (e) => {
             const lower = String(url || '').toLowerCase();
             const pure = lower.split('?')[0].split('#')[0];
             return ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico'].some(ext => pure.endsWith(ext));
-        };
-
-        const decodeBase64Param = (value) => {
-            try {
-                const raw = decodeURIComponent(String(value || '').trim());
-                if (!raw) return '';
-                const padded = raw + '='.repeat((4 - raw.length % 4) % 4);
-                return atob(padded);
-            } catch (_) {
-                return '';
-            }
         };
 
         // 🔍 从 preview/onlinePreview/getCorsFile 链接中提取真实下载URL
@@ -5830,54 +5823,6 @@ window.addEventListener('unhandledrejection', (e) => {
             if (pageFallbackCandidates.length > 0) {
                 appLogger.info(`📎 [免跳转兜底] 初始化候选池 ${pageFallbackCandidates.length} 个URL`);
             }
-
-            // 批量预触发：尽量在同一用户手势窗口内把所有附件的preview都触发出来
-            const preTriggerPreviewForAllFiles = async () => {
-                // ⚠️ 已禁用此功能，避免自动点击导致页面跳转
-                appLogger.info('⚠️ [预触发] 此功能已禁用');
-                return;
-                
-                // 以下代码已停用
-                if (fileItems.length <= 1) return;
-                appLogger.info(`🖱️ [预触发] 开始批量预触发 ${fileItems.length} 个附件`);
-
-                const dispatchRealClick = (element) => {
-                    if (!element) return;
-                    const mouseEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-                    for (const type of mouseEvents) {
-                        element.dispatchEvent(new MouseEvent(type, {
-                            bubbles: true,
-                            cancelable: true,
-                            composed: true,
-                            view: window,
-                            button: 0
-                        }));
-                    }
-                };
-
-                for (let i = 0; i < fileItems.length; i++) {
-                    const item = fileItems[i];
-                    const name = item.querySelector('.box, .line1')?.textContent?.trim() || `附件_${i + 1}`;
-                    const target = item.querySelector('.box, .line1, .file-item') || item;
-
-                    try {
-                        item.scrollIntoView({ behavior: 'instant', block: 'center' });
-                        dispatchRealClick(target);
-                        target.click();
-                        appLogger.info(`🖱️ [预触发] 已触发: ${name}`);
-                        await sleep(120);
-                    } catch (e) {
-                        appLogger.info(`⚠️ [预触发] 触发失败: ${name} - ${e.message}`);
-                    }
-                }
-
-                await sleep(400);
-                appLogger.info('🖱️ [预触发] 批量预触发完成');
-            };
-
-            // ⚠️ 禁用批量预触发功能，避免自动点击导致页面跳转
-            // await preTriggerPreviewForAllFiles();
-            appLogger.info('⚠️ [预触发] 已禁用批量预触发功能，避免页面跳转');
 
             for (let i = 0; i < fileItems.length; i++) {
                 const item = fileItems[i];
