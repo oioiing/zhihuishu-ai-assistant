@@ -5904,10 +5904,9 @@ window.addEventListener('unhandledrejection', (e) => {
                 }
 
                 if (!fileUrl) {
-                    // ⚠️ 不再自动点击附件，避免打开预览页面
-                    appLogger.info(`⚠️ [附件URL] ${fileName} - 未找到URL（已禁用自动点击）`);
-                    // fileUrl = await extractViaClickPreview(item, fileName, i);
-                    method = null;
+                    // 自动点击文件项触发 window.open，由上方拦截器捕获 URL（不会真正打开新标签页）
+                    fileUrl = await extractViaClickPreview(item, fileName, i);
+                    method = fileUrl ? '自动点击+window.open拦截' : null;
                 }
 
                 // 若点击链路失败，直接从页面候选池取“未使用URL”兜底，减少对跳转的依赖。
