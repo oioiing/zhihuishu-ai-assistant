@@ -299,7 +299,8 @@
             { id: 'chat', icon: '💬', text: 'AI对话', color: '#66BB6A' },
             { id: 'analyze', icon: '📊', text: '页面分析', color: '#4FC3F7' },
             { id: 'knowledge', icon: '🔍', text: '知识图谱', color: '#AB47BC' },
-            { id: 'summarize', icon: '📄', text: '页面摘要', color: '#8B5A2B' }
+            { id: 'summarize', icon: '📄', text: '页面摘要', color: '#8B5A2B' },
+            { id: 'domGrading', icon: '📝', text: 'DOM 直接阅卷', color: '#673AB7' }
         ];
 
         const list = document.createElement('div');
@@ -553,11 +554,248 @@
                 showFloatingPanel('智能页面摘要', color, '📄 正在提取页面内容...');
                 handlePageSummarize();
                 break;
+
+            case 'domGrading':
+                animateRingStart(color);
+                showFloatingPanel('DOM 直接阅卷', color, '📝 正在读取页面作业内容...');
+                handleDomGrading();
+                break;
         }
     }
     // ==========================================
     // 6. 功能实现
     // ==========================================
+
+    // --- DOM 直接阅卷 ---
+    function handleDomGrading() {
+        console.log('📝 开始 DOM 直接阅卷...');
+
+        try {
+            const homeworkData = extractHomeworkDOM();
+            console.log('✅ DOM 提取结果:', homeworkData);
+
+            if (!homeworkData.question && !homeworkData.answer) {
+                updatePanelBody(`
+                    <div style="color:red; padding:20px; text-align:center;">
+                        ❌ 未能在当前页面识别到作业内容<br><br>
+                        <div style="font-size:12px; color:#666; text-align:left;">
+                            请确保：<br>
+                            1. 页面已加载完成<br>
+                            2. 当前处于作业批改或预览界面<br>
+                            3. 页面中包含明显的题目和学生答案
+                        </div>
+                    </div>
+                `);
+                animateRingStop();
+                return;
+            }
+
+            updatePanelBody(`
+                <div style="text-align:center; padding:20px;">
+                    <div style="margin-bottom:10px;">🤖 正在调用 AI 进行文本阅卷...</div>
+                    <div style="font-size:12px; color:#666;">
+                        已识别到: ${homeworkData.question ? '题目' : ''} ${homeworkData.answer ? '学生答案' : ''}
+                    </div>
+                </div>
+            `);
+
+            chrome.runtime.sendMessage({
+                action: 'analyzeHomeworkText',
+                homeworkData: homeworkData
+            }, (response) => {
+                console.log('📊 DOM 阅卷响应:', response);
+
+                if (response && response.success) {
+                    displayDomGradingResult(response.data);
+                } else {
+                    updatePanelBody(`
+                        <div style="color:red; padding:20px;">
+                            ❌ 阅卷失败: ${response ? response.error : '未知错误'}
+                        </div>
+                    `);
+                }
+                animateRingStop();
+            });
+
+        } catch (error) {
+            console.error('❌ DOM 提取失败:', error);
+            updatePanelBody(`<div style="color:red;">❌ 提取失败: ${error.message}</div>`);
+            animateRingStop();
+        }
+    }
+
+    function extractHomeworkDOM() {
+        const data = {
+            question: '',
+            answer: '',
+            fullText: ''
+        };
+
+        // 1. 查找题目/参考答案
+        const questionSelectors = [
+            '.reference-answer',
+            '.standard-answer',
+            '.question-box',
+            '.homework-content',
+            '.left-content'
+        ];
+
+        for (const selector of questionSelectors) {
+            const el = document.querySelector(selector);
+            if (el) {
+                data.question = cleanDOMText(el);
+                break;
+            }
+        }
+
+        // 2. 查找学生答案
+        const answerSelectors = [
+            '.break-all.break-words',
+            '.answer-box',
+            '.student-answer',
+            '.evaluation-content',
+            '.right-content'
+        ];
+
+        for (const selector of answerSelectors) {
+            const el = document.querySelector(selector);
+            if (el) {
+                data.answer = cleanDOMText(el);
+                break;
+            }
+        }
+
+        // 3. 兜底方案：如果没有找到特定区域，使用 body 的一部分
+        if (!data.question && !data.answer) {
+            data.fullText = document.body.innerText.substring(0, 5000);
+        }
+
+        return data;
+    }
+
+    function cleanDOMText(element) {
+        if (!element) return '';
+
+        // 克隆元素以避免副作用
+        const clone = element.cloneNode(true);
+
+        // 移除不需要的子元素
+        const junkSelectors = ['script', 'style', 'button', 'input', 'select', 'textarea', '.ai-helper', '.zh-floating-ball'];
+        junkSelectors.forEach(s => {
+            clone.querySelectorAll(s).forEach(el => el.remove());
+        });
+
+        // 递归移除隐藏元素
+        const removeHidden = (el) => {
+            if (el.nodeType === Node.ELEMENT_NODE) {
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') {
+                    el.remove();
+                    return;
+                }
+                Array.from(el.children).forEach(removeHidden);
+            }
+        };
+        // 注意：getComputedStyle 在克隆且未挂载的 DOM 上无效，
+        // 这里简化处理，假设我们提取的是可见内容
+
+        return clone.innerText.trim();
+    }
+
+    function displayDomGradingResult(grading) {
+        let itemsHtml = '';
+        if (grading.items && Array.isArray(grading.items)) {
+            itemsHtml = grading.items.map(item => `
+                <div style="margin-bottom:12px; padding:10px; background:#f9fafb; border-radius:8px; border-left:4px solid #673AB7;">
+                    <div style="font-weight:600; font-size:14px; margin-bottom:4px;">${item.section}</div>
+                    <div style="font-size:13px; color:#4B5563;">得分: <span style="color:#673AB7; font-weight:700;">${item.score}/${item.maxScore}</span></div>
+                    <div style="font-size:12px; margin-top:4px;">${item.feedback}</div>
+                </div>
+            `).join('');
+        }
+
+        const html = `
+            <div style="max-height:500px; overflow-y:auto; padding:10px;">
+                <div style="text-align:center; margin-bottom:16px;">
+                    <div style="font-size:32px; font-weight:800; color:#673AB7;">${grading.totalScore}</div>
+                    <div style="font-size:14px; color:#6B7280;">总分建议</div>
+                </div>
+
+                <div style="margin-bottom:20px;">
+                    <h4 style="margin:0 0 10px 0; color:#1F2937; border-bottom:1px solid #E5E7EB; padding-bottom:5px;">📋 详细评分</h4>
+                    ${itemsHtml || '<div style="color:#999;font-size:12px;">未识别到分项评分</div>'}
+                </div>
+
+                <div style="background:#F3F4F6; padding:12px; border-radius:8px; margin-bottom:20px;">
+                    <h4 style="margin:0 0 8px 0; color:#374151;">💡 总体评价</h4>
+                    <div style="font-size:13px; line-height:1.6; color:#4B5563;">${grading.totalFeedback}</div>
+                </div>
+
+                <div style="text-align:center;">
+                    <button id="zh-auto-fill-btn" style="background:#673AB7; color:white; border:none; padding:10px 20px; border-radius:8px; cursor:pointer; font-weight:600; width:100%; transition:all 0.2s ease;">
+                        ✨ 自动填充到页面
+                    </button>
+                </div>
+            </div>
+        `;
+
+        updatePanelBody(html);
+
+        // 自动填充按钮点击事件
+        const btn = document.getElementById('zh-auto-fill-btn');
+        if (btn) {
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                autoFillGrading(grading.totalScore, grading.totalFeedback);
+            };
+        }
+    }
+
+    function autoFillGrading(score, comment) {
+        console.log('✨ 开始自动填充...', { score, comment });
+
+        try {
+            // 1. 填充分数
+            const scoreInput = document.querySelector('input[placeholder*="成绩"], input[placeholder*="分"], .el-input__inner[type="number"]');
+            if (scoreInput) {
+                scoreInput.value = score;
+                // 触发 Vue/React 的 input 事件
+                scoreInput.dispatchEvent(new Event('input', { bubbles: true }));
+                scoreInput.dispatchEvent(new Event('change', { bubbles: true }));
+                console.log('✅ 分数已填充');
+            } else {
+                console.warn('⚠️ 未找到分数输入框');
+            }
+
+            // 2. 填充评语
+            const commentTextarea = document.querySelector('textarea.el-textarea__inner, textarea[placeholder*="评语"], textarea[placeholder*="意见"]');
+            if (commentTextarea) {
+                commentTextarea.value = comment;
+                commentTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+                commentTextarea.dispatchEvent(new Event('change', { bubbles: true }));
+                console.log('✅ 评语已填充');
+            } else {
+                console.warn('⚠️ 未找到评语输入框');
+            }
+
+            if (scoreInput || commentTextarea) {
+                const btn = document.getElementById('zh-auto-fill-btn');
+                if (btn) {
+                    btn.textContent = '✅ 已成功填充';
+                    btn.style.background = '#10B981';
+                    setTimeout(() => {
+                        btn.textContent = '✨ 再次填充';
+                        btn.style.background = '#673AB7';
+                    }, 2000);
+                }
+            } else {
+                alert('⚠️ 填充失败：未在页面上找到分数或评语输入框。请确保当前处于批改编辑模式。');
+            }
+        } catch (err) {
+            console.error('❌ 自动填充出错:', err);
+            alert('❌ 自动填充出错: ' + err.message);
+        }
+    }
     
     // --- 聊天功能 ---
     function renderChatUI(){

@@ -66,6 +66,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ success: false, error: error.message });
                 });
             return true;
+
+        case 'analyzeHomeworkText':
+            analyzeHomeworkTextDirect(request.homeworkData)
+                .then(response => {
+                    sendResponse({ success: true, data: response });
+                })
+                .catch(error => {
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true;
             
         case 'analyzeHomework':
             analyzeHomeworkWithAI(request.imageData, request.selectionInfo)
@@ -481,7 +491,7 @@ async function tryAlternativeOCR(imageData, language = 'chs') {
 
 // 分析文字内容（使用自定义批改规则）
 async function analyzeTextContent(text) {
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b";  // 用户的真实API密钥
+    const API_KEY = "YOUR_API_KEY_HERE";  // 用户的真实API密钥
     const API_URL = "https://api.deepseek.com/chat/completions";
     
     try {
@@ -634,7 +644,7 @@ ${text}
 // 调用DeepSeek API的函数（修复编码问题）
 async function callDeepSeekAPI(message) {
     // DeepSeek API Key - 用户的真实API密钥
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b";  // 用户的真实API密钥
+    const API_KEY = "YOUR_API_KEY_HERE";  // 用户的真实API密钥
     const API_URL = "https://api.deepseek.com/chat/completions";  // 官方API端点
     
     // 检查API Key
@@ -806,6 +816,243 @@ async function callDeepSeekAPI(message) {
             throw error;
         }
     }
+}
+
+// ==========================================
+// 文本作业AI阅卷（直接从DOM提取）
+// ==========================================
+async function analyzeHomeworkTextDirect(homeworkData) {
+    console.log('🎯 [Step 1/5] 开始文本作业阅卷流程...');
+    console.log('📝 [Step 1/5] 作业数据:', homeworkData);
+
+    try {
+        // 构建完整的作业文本
+        console.log('📝 [Step 2/5] 构建作业文本...');
+        let homeworkText = '';
+
+        if (homeworkData.question) {
+            homeworkText += `【作业题目】\n${homeworkData.question}\n\n`;
+        }
+
+        if (homeworkData.answer) {
+            homeworkText += `【学生答案】\n${homeworkData.answer}`;
+        } else if (homeworkData.fullText) {
+            homeworkText = homeworkData.fullText;
+        }
+
+        if (!homeworkText || homeworkText.trim().length === 0) {
+            throw new Error('未能提取到有效的作业内容');
+        }
+
+        console.log('✅ [Step 2/5] 作业文本准备完成');
+        console.log('📊 [Step 2/5] 文本长度:', homeworkText.length);
+
+        // 调用AI评分（添加超时控制）
+        console.log('🤖 [Step 3/5] 准备调用AI评分（30秒超时）...');
+
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => {
+                console.error('⏱️ [Step 3/5] AI分析超时！');
+                reject(new Error('AI分析超时（30秒），请检查网络连接或稍后重试'));
+            }, 30000)
+        );
+
+        const gradingPromise = performHomeworkGrading(homeworkText);
+
+        console.log('⏳ [Step 3/5] 等待AI响应...');
+        const gradingResult = await Promise.race([gradingPromise, timeoutPromise]);
+
+        console.log('✅ [Step 4/5] AI评分完成');
+
+        // 解析结果
+        console.log('🔍 [Step 5/5] 解析评分结果...');
+        let finalResult;
+
+        if (typeof gradingResult === 'string') {
+            console.log('📝 [Step 5/5] 结果为字符串，尝试解析...');
+            finalResult = parseGradingResult(gradingResult);
+        } else {
+            console.log('✅ [Step 5/5] 结果已是对象格式');
+            finalResult = gradingResult;
+        }
+
+        console.log('🎉 [Step 5/5] 文本作业阅卷完成！');
+        return finalResult;
+
+    } catch (error) {
+        console.error('❌ [Error] 文本作业阅卷失败:', error);
+        if (error.message.includes('timeout') || error.message.includes('超时')) {
+            throw new Error('AI分析超时，请检查网络连接后重试');
+        } else if (error.message.includes('Failed to fetch') || error.message.includes('网络')) {
+            throw new Error('网络连接失败，请检查网络设置');
+        } else {
+            throw error;
+        }
+    }
+}
+
+// ==========================================
+// AI作业阅卷核心函数 - 返回结构化评分数据
+// ==========================================
+async function performHomeworkGrading(homeworkText) {
+    const API_KEY = "YOUR_API_KEY_HERE";
+    const API_URL = "https://api.deepseek.com/chat/completions";
+
+    const gradingPrompt = `你是一位有经验的教师，需要对学生的客观题（选择题）作业进行批改。
+
+    【学生答卷内容】
+    ${homeworkText}
+
+    【阅卷要求】
+    1. 识别每个题目区间的学生答案（如：1-5题、6-10题等）
+    2. 对比每道题的正误，计算该区间的得分
+    3. 每个区间满分为25分，每错一题扣1分
+    4. 生成详细的评分理由
+
+    【重要：必须返回以下JSON格式】
+    \`\`\`json
+    {
+    "totalScore": 85,
+    "items": [
+        {
+        "section": "第1-5题",
+        "studentAnswers": "ABCAB",
+        "correctAnswers": "ABCAB",
+        "score": 25,
+        "maxScore": 25,
+        "errors": [],
+        "feedback": "学生答案与正确答案完全一致，得满分。"
+        },
+        {
+        "section": "第6-10题",
+        "studentAnswers": "AAAAD",
+        "correctAnswers": "ABCDD",
+        "score": 20,
+        "maxScore": 25,
+        "errors": ["第6题错误", "第7题错误", "第9题错误"],
+        "feedback": "学生答案在第6、7、9题出现错误，共扣5分。"
+        }
+    ],
+    "totalFeedback": "总体评价：学生回答较为认真，但存在一定的知识漏洞。建议重点复习第6-10题相关知识点。"
+    }
+    \`\`\`
+
+    请严格按照上述JSON格式返回结果，确保所有数值正确。`;
+
+    try {
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${API_KEY}`
+            },
+            body: JSON.stringify({
+                model: "deepseek-chat",
+                messages: [
+                    {
+                        role: "system",
+                        content: "你是一位专业的教师，精通客观题批改和成绩评定。必须返回有效的JSON格式。"
+                    },
+                    {
+                        role: "user",
+                        content: gradingPrompt
+                    }
+                ],
+                temperature: 0.3,
+                max_tokens: 3000
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`API Error: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+            throw new Error('API 响应格式错误');
+        }
+
+        const content = data.choices[0].message.content;
+        console.log('✅ AI评分完成');
+
+        return parseJSONFromResponse(content);
+
+    } catch (error) {
+        console.error('❌ 作业阅卷失败:', error);
+        throw error;
+    }
+}
+
+// 从AI响应中解析JSON
+function parseJSONFromResponse(response) {
+    try {
+        // 尝试直接解析
+        const parsed = JSON.parse(response);
+        if (parsed && (parsed.totalScore !== undefined || parsed.totalFeedback !== undefined)) {
+            return parsed;
+        }
+    } catch (e) {
+        // 尝试从```json...```中提取
+        const jsonMatch = response.match(/```json\n?([\s\S]*?)\n?```/);
+        if (jsonMatch && jsonMatch[1]) {
+            try {
+                return JSON.parse(jsonMatch[1]);
+            } catch (e2) {
+                console.log('JSON in code block parse failed:', e2);
+            }
+        }
+
+        // 尝试从花括号中提取
+        const braceMatch = response.match(/\{[\s\S]*\}/);
+        if (braceMatch) {
+            try {
+                return JSON.parse(braceMatch[0]);
+            } catch (e3) {
+                console.log('JSON in braces parse failed:', e3);
+            }
+        }
+    }
+
+    // 如果无法解析，返回文本响应进行备选处理
+    console.warn('无法解析JSON，返回文本供后续处理');
+    return response;
+}
+
+// 解析阅卷结果（如果AI返回文本而非JSON）
+function parseGradingResult(text) {
+    console.log('🔍 解析评分结果...');
+
+    const result = {
+        totalScore: 0,
+        items: [],
+        totalFeedback: text,
+        parsedFromText: true
+    };
+
+    // 尝试提取总分
+    const totalMatch = text.match(/(?:总分|总体得分|总体)[：:]*\s*(\d+)\s*分?/);
+    if (totalMatch) {
+        result.totalScore = parseInt(totalMatch[1]);
+    }
+
+    // 尝试提取各题区间的分数
+    const sectionMatches = text.matchAll(/(?:第?\s*(\d+)\s*[-～到至]\s*(\d+)\s*题?|(?:题目|第)?\s*(\d+)\s*题?[：:]).*?(?:(\d+)\s*\/\s*(\d+)|(\d+)\s*分)/g);
+    for (const match of sectionMatches) {
+        const startNum = match[1] || match[3];
+        const endNum = match[2] || match[3];
+        const score = match[4] || match[6];
+        const maxScore = match[5];
+
+        if (startNum && score) {
+            result.items.push({
+                section: `第${startNum}-${endNum}题`,
+                score: parseInt(score),
+                maxScore: maxScore ? parseInt(maxScore) : 25
+            });
+        }
+    }
+
+    return result;
 }
 
 // 处理标签页更新事件
@@ -1366,7 +1613,7 @@ function createFallbackKnowledgeGraph() {
 // ==========================================
 async function generatePageSummary(pageData) {
     // 你的 DeepSeek API Key
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b"; 
+    const API_KEY = "YOUR_API_KEY_HERE";
     const API_URL = "https://api.deepseek.com/chat/completions";
     
     try {
@@ -1436,7 +1683,7 @@ ${content}
 // ==========================================
 async function analyzeContentWithDeepSeek(rawContent) {
     // 🔴 记得替换你的 API Key
-    const API_KEY = "sk-6f2c1a0e4f6c4274a3abd1754777655b"; 
+    const API_KEY = "YOUR_API_KEY_HERE";
     const API_URL = "https://api.deepseek.com/chat/completions";
 
     const prompt = `
