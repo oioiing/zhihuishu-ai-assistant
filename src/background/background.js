@@ -1,6 +1,112 @@
 // 智能作业阅卷助手 - 后台脚本
 
 // ==========================================
+// DOCX 文本提取器（内联实现）
+// ==========================================
+/**
+ * 从 DOCX 文件的 ArrayBuffer 中提取纯文本
+ */
+async function extractTextFromDocx(arrayBuffer) {
+    try {
+        const dataView = new DataView(arrayBuffer);
+        
+        // 验证 ZIP 文件头（PK\x03\x04）
+        if (dataView.getUint32(0, true) !== 0x04034b50) {
+            throw new Error('不是有效的 DOCX 文件（ZIP 格式）');
+        }
+        
+        // 查找 word/document.xml 文件
+        const documentXml = await findFileInZip(arrayBuffer, 'word/document.xml');
+        if (!documentXml) {
+            throw new Error('未找到 document.xml');
+        }
+        
+        // 解析 XML 提取文本
+        const text = extractTextFromXml(documentXml);
+        return text;
+        
+    } catch (error) {
+        console.error('❌ [DOCX解析] 失败:', error.message);
+        throw error;
+    }
+}
+
+async function findFileInZip(zipData, fileName) {
+    const dataView = new DataView(zipData);
+    const decoder = new TextDecoder('utf-8');
+    let offset = 0;
+    
+    while (offset < zipData.byteLength - 4) {
+        const signature = dataView.getUint32(offset, true);
+        
+        if (signature === 0x04034b50) {
+            const filenameLength = dataView.getUint16(offset + 26, true);
+            const extraFieldLength = dataView.getUint16(offset + 28, true);
+            const compressedSize = dataView.getUint32(offset + 18, true);
+            const compressionMethod = dataView.getUint16(offset + 8, true);
+            
+            const filenameBytes = new Uint8Array(zipData, offset + 30, filenameLength);
+            const currentFileName = decoder.decode(filenameBytes);
+            
+            if (currentFileName === fileName) {
+                const dataOffset = offset + 30 + filenameLength + extraFieldLength;
+                const compressedData = new Uint8Array(zipData, dataOffset, compressedSize);
+                
+                if (compressionMethod === 0) {
+                    return decoder.decode(compressedData);
+                }
+                
+                if (compressionMethod === 8) {
+                    try {
+                        const stream = new Blob([compressedData]).stream();
+                        const decompressedStream = stream.pipeThrough(
+                            new DecompressionStream('deflate-raw')
+                        );
+                        const decompressedBlob = await new Response(decompressedStream).blob();
+                        const decompressedText = await decompressedBlob.text();
+                        return decompressedText;
+                    } catch (e) {
+                        console.warn('⚠️ [解压] 浏览器解压失败:', e.message);
+                        return decoder.decode(compressedData);
+                    }
+                }
+            }
+            
+            offset += 30 + filenameLength + extraFieldLength + compressedSize;
+        } else {
+            offset++;
+        }
+    }
+    
+    return null;
+}
+
+function extractTextFromXml(xml) {
+    const textRegex = /<w:t[^>]*>(.*?)<\/w:t>/gs;
+    const paragraphs = xml.split(/<w:p[\s>]/);
+    const result = [];
+    
+    for (const para of paragraphs) {
+        const paraTexts = [];
+        let match;
+        while ((match = textRegex.exec(para)) !== null) {
+            const text = match[1]
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&amp;/g, '&')
+                .replace(/&quot;/g, '"')
+                .replace(/&apos;/g, "'");
+            paraTexts.push(text);
+        }
+        if (paraTexts.length > 0) {
+            result.push(paraTexts.join(''));
+        }
+    }
+    
+    return result.join('\n').trim();
+}
+
+// ==========================================
 // 全局API配置（集中管理，避免重复定义）
 // ==========================================
 const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
@@ -17,6 +123,85 @@ const LOG_LEVELS = {
     error: 40,
     silent: 99
 };
+
+const NETWORK_ATTACHMENT_TRACKER = {
+    maxItems: 300,
+    ttlMs: 5 * 60 * 1000,
+    byTab: new Map()
+};
+
+function isTrackedAttachmentUrl(url) {
+    const lower = String(url || '').toLowerCase();
+    if (!lower.startsWith('http')) return false;
+    if (lower.includes('image.zhihuishu.com')) return false;
+    if (lower.includes('google.cn') || lower.includes('baidu.com')) return false;
+
+    return lower.includes('file.zhihuishu.com') ||
+        lower.includes('aliyuncs.com') ||
+        lower.includes('/resource/preview') ||
+        lower.includes('/resource/onlinepreview') ||
+        lower.includes('/resource/getcorsfile') ||
+        lower.includes('download') ||
+        lower.includes('attachment');
+}
+
+function cleanupTrackedUrls(tabId) {
+    const records = NETWORK_ATTACHMENT_TRACKER.byTab.get(tabId);
+    if (!records || !records.length) return;
+    const now = Date.now();
+    const alive = records.filter((item) => (now - Number(item.timestamp || 0)) <= NETWORK_ATTACHMENT_TRACKER.ttlMs);
+    if (alive.length) {
+        NETWORK_ATTACHMENT_TRACKER.byTab.set(tabId, alive.slice(-NETWORK_ATTACHMENT_TRACKER.maxItems));
+    } else {
+        NETWORK_ATTACHMENT_TRACKER.byTab.delete(tabId);
+    }
+}
+
+function trackAttachmentUrl(tabId, url, source = 'webRequest') {
+    if (!Number.isInteger(tabId) || tabId < 0) return;
+    if (!isTrackedAttachmentUrl(url)) return;
+
+    cleanupTrackedUrls(tabId);
+    const current = NETWORK_ATTACHMENT_TRACKER.byTab.get(tabId) || [];
+    const timestamp = Date.now();
+
+    const exists = current.some((item) => item && item.url === url);
+    if (exists) return;
+
+    current.push({ url, source, timestamp });
+    NETWORK_ATTACHMENT_TRACKER.byTab.set(tabId, current.slice(-NETWORK_ATTACHMENT_TRACKER.maxItems));
+}
+
+function getTrackedAttachmentUrlsForTab(tabId, sinceTs = 0, consume = false) {
+    cleanupTrackedUrls(tabId);
+    const records = NETWORK_ATTACHMENT_TRACKER.byTab.get(tabId) || [];
+    const minTs = Number(sinceTs || 0);
+    const filtered = records.filter((item) => Number(item.timestamp || 0) >= minTs);
+    const urls = Array.from(new Set(filtered.map((item) => item.url).filter(Boolean)));
+
+    if (consume && Number.isInteger(tabId) && tabId >= 0) {
+        NETWORK_ATTACHMENT_TRACKER.byTab.delete(tabId);
+    }
+
+    return {
+        count: urls.length,
+        urls,
+        records: filtered
+    };
+}
+
+if (chrome?.webRequest?.onCompleted) {
+    chrome.webRequest.onCompleted.addListener(
+        (details) => {
+            try {
+                trackAttachmentUrl(details?.tabId, details?.url, 'webRequest.onCompleted');
+            } catch (error) {
+                console.warn('⚠️ [Background] 记录网络附件URL失败:', error.message);
+            }
+        },
+        { urls: ['<all_urls>'] }
+    );
+}
 
 let currentLogLevel = 'info';
 const nativeConsole = {
@@ -290,6 +475,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     result = { success: true, message: 'pong', timestamp: Date.now() };
                     console.log('🏓 [Background] Ping响应已准备:', result);
                     break;
+
+                case 'getTrackedAttachmentUrls': {
+                    const senderTabId = sender?.tab?.id;
+                    const tabId = Number.isInteger(request?.tabId) ? request.tabId : senderTabId;
+                    if (!Number.isInteger(tabId)) {
+                        result = { success: false, error: '无法确定当前标签页ID' };
+                        break;
+                    }
+
+                    const tracked = getTrackedAttachmentUrlsForTab(
+                        tabId,
+                        request?.sinceTs || 0,
+                        !!request?.consume
+                    );
+
+                    result = {
+                        success: true,
+                        tabId,
+                        count: tracked.count,
+                        urls: tracked.urls,
+                        records: tracked.records
+                    };
+                    break;
+                }
                     
                 case 'captureScreen':
                     console.log('📸 [Background] 截屏请求');
@@ -539,6 +748,123 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     } catch (error) {
                         console.error('❌ [Background] OCR 识别失败:', error.message);
                         result = { success: false, error: error.message || 'OCR 识别失败' };
+                    }
+                    break;
+
+                case 'downloadAndParseAttachment':
+                    console.log('📎 [Background] 单附件下载解析请求');
+                    try {
+                        const fileUrl = String(request.fileUrl || '').trim();
+                        const fileName = String(request.fileName || '').trim() || 'unknown';
+
+                        if (!fileUrl) {
+                            throw new Error('fileUrl 为空');
+                        }
+
+                        const response = await fetch(fileUrl);
+                        if (!response.ok) {
+                            throw new Error(`下载失败: HTTP ${response.status}`);
+                        }
+
+                        const lowerName = fileName.toLowerCase();
+                        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+                        let content = '';
+
+                        // 优先按文件后缀判断，避免某些站点 content-type 不准确。
+                        if (lowerName.endsWith('.docx') || contentType.includes('officedocument.wordprocessingml')) {
+                            const arrayBuffer = await response.arrayBuffer();
+                            try {
+                                content = await extractTextFromDocx(arrayBuffer);
+                            } catch (docxError) {
+                                console.warn('⚠️ [Background] DOCX解析失败，回退到文本读取:', docxError.message);
+                                content = new TextDecoder('utf-8').decode(new Uint8Array(arrayBuffer));
+                            }
+                        } else {
+                            content = await response.text();
+                        }
+
+                        result = {
+                            success: true,
+                            fileUrl,
+                            fileName,
+                            content: String(content || '')
+                        };
+                    } catch (error) {
+                        console.error('❌ [Background] 单附件解析失败:', error.message);
+                        result = {
+                            success: false,
+                            error: error.message || '下载解析失败'
+                        };
+                    }
+                    break;
+                    
+                case 'downloadAttachments':
+                    console.log('📎 [Background] 附件下载请求');
+                    console.log('📊 [Background] 附件数量:', request.urls?.length || 0);
+                    try {
+                        const urls = request.urls || [];
+                        const results = [];
+                        
+                        for (const urlObj of urls) {
+                            console.log(`⬇️ [附件下载] 开始下载: ${urlObj.name}`);
+                            console.log(`   URL: ${urlObj.url}`);
+                            
+                            try {
+                                const response = await fetch(urlObj.url);
+                                if (!response.ok) {
+                                    console.error(`❌ [附件下载] HTTP错误: ${response.status}`);
+                                    results.push({
+                                        fileName: urlObj.name,
+                                        content: `下载失败：HTTP ${response.status}`,
+                                        success: false
+                                    });
+                                    continue;
+                                }
+                                
+                                // 判断文件类型并使用相应的解析方法
+                                let content = '';
+                                const fileName = urlObj.name.toLowerCase();
+                                
+                                if (fileName.endsWith('.docx')) {
+                                    console.log(`📄 [DOCX解析] 开始解析: ${urlObj.name}`);
+                                    try {
+                                        const arrayBuffer = await response.arrayBuffer();
+                                        content = await extractTextFromDocx(arrayBuffer);
+                                        console.log(`✅ [DOCX解析] 成功提取文本，长度: ${content.length} 字符`);
+                                        console.log(`   内容预览: ${content.substring(0, 300)}...`);
+                                    } catch (docxError) {
+                                        console.error(`❌ [DOCX解析] 失败，回退到text():`, docxError.message);
+                                        // 回退：使用 text() 方法（会产生乱码，但总比失败好）
+                                        const textResponse = await fetch(urlObj.url);
+                                        content = await textResponse.text();
+                                        console.log(`⚠️ [DOCX解析] 使用text()回退，内容可能乱码`);
+                                    }
+                                } else {
+                                    // 非 DOCX 文件，直接读取文本
+                                    content = await response.text();
+                                    console.log(`✅ [附件下载] 文本文件，大小: ${content.length} 字符`);
+                                }
+                                
+                                results.push({
+                                    fileName: urlObj.name,
+                                    content: content,
+                                    success: true
+                                });
+                            } catch (error) {
+                                console.error(`❌ [附件下载] 失败:`, error.message);
+                                results.push({
+                                    fileName: urlObj.name,
+                                    content: `下载失败：${error.message}`,
+                                    success: false
+                                });
+                            }
+                        }
+                        
+                        console.log(`✅ [Background] 附件处理完成: 成功${results.filter(r => r.success).length}个，失败${results.filter(r => !r.success).length}个`);
+                        result = { success: true, attachments: results };
+                    } catch (error) {
+                        console.error('❌ [Background] 附件处理失败:', error.message);
+                        result = { success: false, error: error.message || '附件处理失败' };
                     }
                     break;
                     
@@ -987,20 +1313,40 @@ async function analyzeHomeworkDetailsWithAI(homeworkDetails) {
     截止时间: ${homeworkDetails.deadline || '未提供'}
     要求: ${homeworkDetails.requirements || '未提供'}
     知识点: ${Array.isArray(homeworkDetails.knowledgePoints) ? homeworkDetails.knowledgePoints.join('；') : '未提供'}
+    ${homeworkDetails.attachments && homeworkDetails.attachments.length > 0 ? `附件: ${homeworkDetails.attachments.map(f => f.name).join('、')}` : ''}
 
     【作业题目/内容】
     ${homeworkDetails.content || '未提供'}
 
+    ${homeworkDetails.attachmentSummaryFull ? `【附件完整内容】
+${homeworkDetails.attachmentSummaryFull}
+
+⚠️ 重要：上述附件包含多道题目，您必须逐题分析（不要只分析第1题），确保每道题都有对应的答案和解析。` : ''}
+
+    ${homeworkDetails.teacherProvidedAnswer ? `【老师提供的参考答案】
+    ${homeworkDetails.teacherProvidedAnswer}` : ''}
+
     【您的任务】
     1. 判断这是什么类型的作业（如：选择题、填空题、简答题、论述题、实践题等）
     2. 分析这类作业应该如何评分
-    3. 提供详细的批改建议
+    3. 提供详细的批改建议${homeworkDetails.attachments && homeworkDetails.attachments.length > 0 ? '（注意：学生已提交附件文件，已为您提供完整内容，批改时应结合所有题目进行，确保逐题分析）' : ''}
     4. 列举常见的学生错误
+    5. 生成答案部分：
+       - 如果老师已提供参考答案：referenceAnswer 必须直接使用老师答案（不要改写）
+       - 如果老师未提供：基于题干和附件材料推导参考答案
+       - 客观题(选择题)格式：
+         答案：1.A 2.B 3.C ...
+         逐题解析：
+         1. 答案：A
+            解析：按做题思路说明（题干关键词 + 选项对比 + 排除理由）
+         2. 答案：B
+            解析：按做题思路说明
+       - 主观题格式：提供范文或答题要点
 
     【重要：必须返回以下JSON格式】
     \`\`\`json
     {
-    "homeworkType": "作业类型分类，如：论述题/分析题",
+    "homeworkType": "作业类型分类，如：选择题/客观题",
     "typeExplanation": "对作业类型的简要说明",
     "gradingCriteria": [
         "评分标准1：具体说明",
@@ -1012,7 +1358,10 @@ async function analyzeHomeworkDetailsWithAI(homeworkDetails) {
         "常见错误1：学生可能会...",
         "常见错误2：学生容易...",
         "常见错误3：需要注意..."
-    ]
+    ],
+    "referenceAnswerType": "objective 或 model_essay",
+    "referenceAnswerSource": "teacher 或 inferred",
+    "referenceAnswer": "必须包含完整答案和解析"
     }
     \`\`\``;
 

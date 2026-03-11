@@ -27,6 +27,13 @@ coverage/
 .env
 .env.*
 
+# Extension files
+*.pem
+*.key
+*.private
+*.crx
+*.zip
+
 # Archive
 *.zip
 *.rar

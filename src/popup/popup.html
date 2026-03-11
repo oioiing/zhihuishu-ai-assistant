@@ -173,6 +173,11 @@
             transform: translateY(0px) scale(0.998);
         }
 
+        .feature-row.busy {
+            opacity: 0.58;
+            pointer-events: none;
+        }
+
         .feature-row.cta {
             background: var(--cta-bg);
             border-color: var(--cta-bg);
@@ -543,12 +548,24 @@
             animation: tabElastic 440ms cubic-bezier(0.2, 1.25, 0.2, 1);
         }
 
-
         @keyframes tabElastic {
             0% { transform: scale(0.78) translateY(3px); }
             40% { transform: scale(1.14) translateY(-2px); }
             70% { transform: scale(0.96) translateY(1px); }
             100% { transform: scale(1) translateY(0); }
+        }
+
+        /* CSS类替换内联style - Settings tab标签和checkbox */
+        .settings-checkbox-label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            margin: 0;
+        }
+
+        .settings-checkbox-input {
+            margin-right: 8px;
+            cursor: pointer;
         }
 
     </style>
@@ -604,7 +621,7 @@
                     <div class="title">批改单个学生</div>
                     <div class="desc autocomplete-container">
                         <input type="text" id="student-name-input" placeholder="输入学生姓名..." 
-                               class="student-input" onclick="event.stopPropagation()" 
+                               class="student-input" 
                                autocomplete="off">
                         <div id="autocomplete-dropdown" class="autocomplete-dropdown"></div>
                     </div>
@@ -617,9 +634,9 @@
                 <span class="icon">⚙️</span>
                 <div class="body">
                     <div class="title">
-                        <label style="display: flex; align-items: center; cursor: pointer; margin: 0;">
+                        <label class="settings-checkbox-label">
                             <input type="checkbox" id="include-reviewed-checkbox" 
-                                   style="margin-right: 8px; cursor: pointer;">
+                                   class="settings-checkbox-input">
                             <span>包括已批阅作业</span>
                         </label>
                     </div>
@@ -631,13 +648,32 @@
                 <span class="icon">📐</span>
                 <div class="body">
                     <div class="title">
-                        <label style="display: flex; align-items: center; cursor: pointer; margin: 0;">
+                        <label class="settings-checkbox-label">
                             <input type="checkbox" id="show-rule-breakdown-checkbox" checked
-                                   style="margin-right: 8px; cursor: pointer;">
+                                   class="settings-checkbox-input">
                             <span>显示规则评分明细</span>
                         </label>
                     </div>
                     <div class="desc">在评语末尾展示扣分与分项得分</div>
+                </div>
+            </div>
+
+            <div class="feature-row settings-row">
+                <span class="icon">🤖</span>
+                <div class="body">
+                    <div class="title">
+                        <div class="settings-title-row">
+                            <span>自动执行模式</span>
+                        </div>
+                    </div>
+                    <div class="desc">可选：完全手动 / 仅自动跳转 / 自动跳转并自动执行</div>
+                    <div class="runtime-row">
+                        <select id="auto-execution-mode-select" class="runtime-select" aria-label="自动执行模式">
+                            <option value="manual">完全手动</option>
+                            <option value="navigate_only">仅自动跳转</option>
+                            <option value="full">自动跳转并自动执行</option>
+                        </select>
+                    </div>
                 </div>
             </div>
 
@@ -691,6 +727,8 @@
 
         </div>
     </div>
+
+    <div id="status" class="status" role="status" aria-live="polite">初始化中...</div>
 
     <div class="tab-shell">
         <div class="tab-bar">

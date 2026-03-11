@@ -45,6 +45,67 @@ window.addEventListener('unhandledrejection', (e) => {
         }
     }
 
+    function isPreviewLikeUrl(url) {
+        const lower = String(url || '').toLowerCase();
+        return lower.includes('resource/preview') ||
+            lower.includes('resource/onlinepreview') ||
+            lower.includes('resource/getcorsfile');
+    }
+
+    function isLikelyAttachmentHost(url) {
+        try {
+            const host = new URL(String(url || '')).hostname.toLowerCase();
+            return host.includes('polymas.com') ||
+                host.includes('aliyuncs.com') ||
+                host.includes('file.zhihuishu.com');
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function recordInterceptedPreviewUrl(rawUrl, source = 'unknown') {
+        const url = String(rawUrl || '').trim();
+        if (!url) return null;
+
+        const shouldRecord = isPreviewLikeUrl(url) || isLikelyAttachmentHost(url);
+        if (!shouldRecord) return null;
+
+        window._zhsInterceptedPreviewUrls = window._zhsInterceptedPreviewUrls || [];
+        const records = window._zhsInterceptedPreviewUrls;
+        const latest = records[records.length - 1];
+
+        // 避免短时间内重复写入同一个URL，减少噪音。
+        if (latest && latest.previewUrl === url && (Date.now() - Number(latest.timestamp || 0) < 600)) {
+            return latest;
+        }
+
+        const record = {
+            previewUrl: url,
+            source,
+            timestamp: Date.now()
+        };
+
+        try {
+            if (isPreviewLikeUrl(url)) {
+                const urlObj = new URL(url);
+                const uParam = urlObj.searchParams.get('u') || urlObj.searchParams.get('urlPath');
+                if (uParam) {
+                    const realUrl = decodeBase64Param(uParam);
+                    if (realUrl) {
+                        record.decodedUrl = realUrl;
+                        console.info(`🔓 [URL捕获/${source}] 解码出真实URL: ${realUrl}`);
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn(`⚠️ [URL捕获/${source}] URL解码失败: ${e.message}`);
+        }
+
+        records.push(record);
+        console.info(`📎 [URL捕获/${source}] 已记录URL（共${records.length}个）`);
+        return record;
+    }
+
     // ========== window.open拦截 - 捕获文件预览URL（避免打开新标签页）==========
     (() => {
         const originalOpen = window.open;
@@ -54,34 +115,9 @@ window.addEventListener('unhandledrejection', (e) => {
             console.info(`🔗 [window.open拦截] 捕获到URL: ${url}`);
             
             // 记录所有preview相关URL
-            if (url && typeof url === 'string' && 
-                (url.includes('resource/preview') || 
-                 url.includes('resource/onlinePreview') ||
-                 url.includes('resource/getCorsFile'))) {
-                
-                window._zhsInterceptedPreviewUrls.push({
-                    previewUrl: url,
-                    timestamp: Date.now()
-                });
-                
-                console.info(`📎 [window.open拦截] 记录预览URL（共${window._zhsInterceptedPreviewUrls.length}个）`);
-                console.info(`   Preview URL: ${url.substring(0, 120)}`);
-                
-                // 尝试解码Base64参数获取真实文件URL
-                try {
-                    const urlObj = new URL(url);
-                    const uParam = urlObj.searchParams.get('u') || urlObj.searchParams.get('urlPath');
-                    if (uParam) {
-                        const realUrl = decodeBase64Param(uParam);
-                        console.info(`🔓 [window.open拦截] 解码出真实URL: ${realUrl}`);
-                        
-                        // 记录解码后的URL
-                        window._zhsInterceptedPreviewUrls[window._zhsInterceptedPreviewUrls.length - 1].decodedUrl = realUrl;
-                    }
-                } catch (e) {
-                    console.warn(`⚠️ [window.open拦截] URL解码失败: ${e.message}`);
-                }
-                
+            if (url && typeof url === 'string' && isPreviewLikeUrl(url)) {
+                recordInterceptedPreviewUrl(url, 'window.open');
+
                 // 🚫 阻止打开新标签页：返回一个mock window对象，避免用户看到新标签页弹出
                 console.info(`🚫 [window.open拦截] 已阻止打开新标签页（已提取URL）`);
                 return {
@@ -110,14 +146,23 @@ window.addEventListener('unhandledrejection', (e) => {
             }
             
             if (target && target.tagName === 'A') {
-                const href = target.getAttribute('href') || '';
+                const href = target.getAttribute('href') || target.href || '';
                 const targetAttr = target.getAttribute('target') || '';
+                const hrefLower = String(href || '').toLowerCase();
+                const isPreviewOrAttachmentLink = hrefLower.includes('resource/preview') ||
+                    hrefLower.includes('resource/onlinepreview') ||
+                    hrefLower.includes('resource/getcorsfile') ||
+                    hrefLower.includes('file.zhihuishu.com') ||
+                    hrefLower.includes('aliyuncs.com') ||
+                    hrefLower.includes('polymas.com');
+
+                // 先记录链接，避免Edge等浏览器在阻止新标签页后丢失URL。
+                if (href && isPreviewOrAttachmentLink) {
+                    recordInterceptedPreviewUrl(href, 'anchor.click');
+                }
                 
                 // 如果是预览链接且设置了target="_blank"，阻止打开新标签页
-                if (targetAttr === '_blank' && 
-                    (href.includes('resource/preview') || 
-                     href.includes('resource/onlinePreview') ||
-                     href.includes('polymas.com'))) {
+                if (targetAttr === '_blank' && isPreviewOrAttachmentLink) {
                     console.info(`🚫 [链接拦截] 阻止打开新标签页: ${href.substring(0, 80)}...`);
                     e.preventDefault();
                     e.stopPropagation();
@@ -131,6 +176,50 @@ window.addEventListener('unhandledrejection', (e) => {
         console.info('✅ [链接拦截] 已启动，将阻止预览链接打开新标签页');
     })();
 
+    // ========== 路由拦截 - 捕获 SPA 方式打开的预览URL ==========
+    (() => {
+        try {
+            const originalPushState = history.pushState;
+            const originalReplaceState = history.replaceState;
+
+            const toAbsoluteUrl = (maybeUrl) => {
+                if (!maybeUrl || typeof maybeUrl !== 'string') return '';
+                try {
+                    return new URL(maybeUrl, window.location.href).href;
+                } catch (_) {
+                    return '';
+                }
+            };
+
+            history.pushState = function(state, title, url) {
+                const absUrl = toAbsoluteUrl(url);
+                if (absUrl && isPreviewLikeUrl(absUrl)) {
+                    recordInterceptedPreviewUrl(absUrl, 'history.pushState');
+                }
+                return originalPushState.apply(this, [state, title, url]);
+            };
+
+            history.replaceState = function(state, title, url) {
+                const absUrl = toAbsoluteUrl(url);
+                if (absUrl && isPreviewLikeUrl(absUrl)) {
+                    recordInterceptedPreviewUrl(absUrl, 'history.replaceState');
+                }
+                return originalReplaceState.apply(this, [state, title, url]);
+            };
+
+            window.addEventListener('popstate', () => {
+                const current = window.location.href;
+                if (isPreviewLikeUrl(current)) {
+                    recordInterceptedPreviewUrl(current, 'history.popstate');
+                }
+            });
+
+            console.info('✅ [路由拦截] 已启动，将捕获 SPA 路由中的 preview URL');
+        } catch (error) {
+            console.warn('⚠️ [路由拦截] 启动失败:', error.message);
+        }
+    })();
+
     // ========== Preview页面检测 - 提取文件URL ==========
     (() => {
         const currentUrl = window.location.href;
@@ -138,6 +227,42 @@ window.addEventListener('unhandledrejection', (e) => {
         // 检测是否为preview页面
         if (currentUrl.includes('/resource/preview')) {
             appLogger.info('🎯 [Preview页面] 检测到预览页面，准备提取文件URL...');
+
+            const scheduleLeavePreviewPage = (reason = 'done') => {
+                if (window.__zhsPreviewLeaveScheduled) return;
+                window.__zhsPreviewLeaveScheduled = true;
+
+                setTimeout(() => {
+                    appLogger.info(`↩️ [Preview页面] 提取完成，准备退出预览页 (${reason})`);
+
+                    // 优先尝试关闭窗口（popup/new tab 场景）
+                    try {
+                        window.close();
+                    } catch (_) {
+                        // ignore
+                    }
+
+                    // 不能关闭时回退历史（同标签跳转场景）
+                    if (!window.closed && window.history.length > 1) {
+                        try {
+                            window.history.back();
+                            return;
+                        } catch (_) {
+                            // ignore
+                        }
+                    }
+
+                    // 最后尝试按 referrer 返回
+                    try {
+                        const ref = document.referrer;
+                        if (ref && new URL(ref).origin === window.location.origin) {
+                            window.location.href = ref;
+                        }
+                    } catch (_) {
+                        // ignore
+                    }
+                }, 1200);
+            };
             
             try {
                 const urlObj = new URL(currentUrl);
@@ -147,8 +272,61 @@ window.addEventListener('unhandledrejection', (e) => {
                 if (uParam) {
                     // 解码文件URL
                     const fileUrl = decodeBase64Param(uParam);
+
+                    const extractPdfUrlFromRuntime = () => {
+                        const decodeUrlPathParam = (maybeUrl) => {
+                            try {
+                                const u = new URL(String(maybeUrl || ''));
+                                const p = u.searchParams.get('urlPath') || u.searchParams.get('u');
+                                if (!p) return '';
+                                const decoded = decodeBase64Param(p);
+                                return /^https?:\/\//i.test(decoded) ? decoded : '';
+                            } catch (_) {
+                                return '';
+                            }
+                        };
+
+                        const fromCurrent = decodeUrlPathParam(window.location.href);
+                        if (fromCurrent && fromCurrent.toLowerCase().includes('.pdf')) {
+                            return fromCurrent;
+                        }
+
+                        try {
+                            const entries = performance?.getEntriesByType?.('resource') || [];
+                            for (let i = entries.length - 1; i >= 0; i--) {
+                                const name = String(entries[i]?.name || '');
+                                if (!name.includes('/resource/getCorsFile')) continue;
+                                const decoded = decodeUrlPathParam(name);
+                                if (decoded && decoded.toLowerCase().includes('.pdf')) {
+                                    return decoded;
+                                }
+                            }
+                        } catch (_) {
+                            // ignore
+                        }
+
+                        try {
+                            const html = document.documentElement?.outerHTML || '';
+                            const corsFileRegex = new RegExp('https?:\\/\\/[^\\"\'<>\\s]+resource\\/getCorsFile[^\\"\'<>\\s]+', 'i');
+                            const match = html.match(corsFileRegex);
+                            if (match && match[0]) {
+                                const decoded = decodeUrlPathParam(match[0]);
+                                if (decoded) return decoded;
+                            }
+                        } catch (_) {
+                            // ignore
+                        }
+
+                        return '';
+                    };
+
+                    const runtimePdfUrl = extractPdfUrlFromRuntime();
+                    const effectiveFileUrl = runtimePdfUrl || fileUrl;
                     
                     appLogger.info('✅ [Preview页面] 成功提取文件URL:', fileUrl);
+                    if (runtimePdfUrl) {
+                        appLogger.info('✅ [Preview页面] 检测到可直接分析的PDF链接:', runtimePdfUrl);
+                    }
                     
                     // 解码文件名（可选）
                     let fileName = 'unknown.docx';
@@ -371,11 +549,106 @@ window.addEventListener('unhandledrejection', (e) => {
                     appLogger.info('📤 [Preview页面] 发送文件URL给background...');
                     chrome.runtime.sendMessage({
                         action: 'downloadAndParseAttachment',
-                        fileUrl: fileUrl,
+                        fileUrl: effectiveFileUrl,
                         fileName: fileName
                     }, async (response) => {
+                        const tryExtractRenderedPdfText = async () => {
+                            try {
+                                const iframeTextResult = await new Promise((resolve) => {
+                                    chrome.runtime.sendMessage({ action: 'extractIframeText' }, (res) => {
+                                        if (chrome.runtime.lastError) {
+                                            resolve({ success: false, error: chrome.runtime.lastError.message });
+                                            return;
+                                        }
+                                        resolve(res || { success: false, error: 'empty response' });
+                                    });
+                                });
+
+                                if (iframeTextResult?.success && iframeTextResult.text && iframeTextResult.text.length > 120) {
+                                    const text = String(iframeTextResult.text || '').trim();
+                                    const analysis = analyzeDocxContent(text);
+                                    return {
+                                        success: true,
+                                        text,
+                                        analysis: {
+                                            ...analysis,
+                                            source: 'iframe-pdf-direct'
+                                        }
+                                    };
+                                }
+                            } catch (_) {
+                                // ignore
+                            }
+
+                            return { success: false };
+                        };
+
+                        const finalizePreviewResult = (finalContent, analysis, source = 'preview-fallback', finalFileUrl = effectiveFileUrl) => {
+                            // 将结果存储到window，供opener页面访问
+                            window._zhsPreviewFileResult = {
+                                fileUrl: finalFileUrl,
+                                fileName: fileName,
+                                content: finalContent,
+                                analysis: analysis,
+                                source,
+                                success: true
+                            };
+
+                            // 同步写入扩展共享缓存，避免 opener 消息丢失
+                            persistPreviewResultToSharedStore(window._zhsPreviewFileResult, 'preview-page');
+
+                            // 尝试通知opener页面 - 发送分析结果
+                            if (window.opener && !window.opener.closed) {
+                                try {
+                                    window.opener.postMessage({
+                                        type: 'ZHS_PREVIEW_FILE_READY',
+                                        data: {
+                                            fileUrl: finalFileUrl,
+                                            fileName: fileName,
+                                            content: finalContent,
+                                            analysis: analysis
+                                        }
+                                    }, '*');
+                                    appLogger.info('✅ [Preview页面] 已通知opener页面（包含分析结果）');
+
+                                    // 设置完成标记，防止Preview页面过早关闭
+                                    window._zhsPreviewProcessing = true;
+
+                                    // 500ms后清除标记，给opener充足时间处理
+                                    setTimeout(() => {
+                                        window._zhsPreviewProcessing = false;
+                                        appLogger.info('✅ [Preview页面] 标记已清除，可关闭');
+                                    }, 500);
+                                    appLogger.info('📊 [Preview页面] 分析摘要:', {
+                                        title: analysis?.title,
+                                        questions: (analysis?.questions || []).slice(0, 2).map(q => q.substring(0, 50) + '...'),
+                                        answers: (analysis?.answers || []).slice(0, 2).map(a => a.substring(0, 50) + '...')
+                                    });
+                                } catch (e) {
+                                    appLogger.warn('⚠️ [Preview页面] 无法通知opener:', e.message);
+                                }
+                            }
+
+                            // 无论是否有 opener，都在提取成功后自动退出预览页。
+                            scheduleLeavePreviewPage('analysis-ready');
+                        };
+
                         if (chrome.runtime.lastError) {
                             appLogger.error('❌ [Preview页面] 发送失败:', chrome.runtime.lastError.message);
+                            const directPdf = await tryExtractRenderedPdfText();
+                            if (directPdf.success) {
+                                appLogger.info('✅ [Preview页面] 已直接使用渲染后的PDF文本完成分析');
+                                finalizePreviewResult(directPdf.text, directPdf.analysis, 'preview-sendMessage-failed-direct-pdf');
+                                return;
+                            }
+
+                            // 即使消息失败，也保底回传 URL，避免主流程中断。
+                            const emptyAnalysis = analyzeDocxContent('');
+                            finalizePreviewResult('', {
+                                ...emptyAnalysis,
+                                title: fileName,
+                                source: 'preview-sendMessage-failed'
+                            }, 'preview-sendMessage-failed');
                         } else if (response && response.success) {
                             appLogger.info('✅ [Preview页面] 文件处理成功:', {
                                 fileName: response.fileName,
@@ -570,52 +843,43 @@ window.addEventListener('unhandledrejection', (e) => {
                             } catch (e) {
                                 appLogger.warn('⚠️ [Preview页面] iframe文本提取失败，回退DOCX:', e.message);
                             }
-                            
-                            // 将结果存储到window，供opener页面访问
-                            window._zhsPreviewFileResult = {
-                                fileUrl: fileUrl,
-                                fileName: fileName,
-                                content: finalContent,
-                                analysis: analysis,
-                                success: true
-                            };
-
-                            // 同步写入扩展共享缓存，避免 opener 消息丢失
-                            persistPreviewResultToSharedStore(window._zhsPreviewFileResult, 'preview-page');
-                            
-                            // 尝试通知opener页面 - 发送分析结果
-                            if (window.opener && !window.opener.closed) {
-                                try {
-                                    window.opener.postMessage({
-                                        type: 'ZHS_PREVIEW_FILE_READY',
-                                        data: {
-                                            fileUrl: fileUrl,
-                                            fileName: fileName,
-                                            content: finalContent,
-                                            analysis: analysis
-                                        }
-                                    }, '*');
-                                    appLogger.info('✅ [Preview页面] 已通知opener页面（包含分析结果）');
-                                    
-                                    // 设置完成标记，防止Preview页面过早关闭
-                                    window._zhsPreviewProcessing = true;
-                                    
-                                    // 500ms后清除标记，给opener充足时间处理
-                                    setTimeout(() => {
-                                        window._zhsPreviewProcessing = false;
-                                        appLogger.info('✅ [Preview页面] 标记已清除，可关闭');
-                                    }, 500);
-                                    appLogger.info('📊 [Preview页面] 分析摘要:', {
-                                        title: analysis.title,
-                                        questions: analysis.questions.slice(0, 2).map(q => q.substring(0, 50) + '...'),
-                                        answers: analysis.answers.slice(0, 2).map(a => a.substring(0, 50) + '...')
-                                    });
-                                } catch (e) {
-                                    appLogger.warn('⚠️ [Preview页面] 无法通知opener:', e.message);
-                                }
-                            }
+                            finalizePreviewResult(finalContent, analysis, 'preview-normal');
                         } else {
                             appLogger.error('❌ [Preview页面] 文件处理失败:', response);
+                            appLogger.warn(`⚠️ [Preview页面] background解析失败，将使用页面内兜底继续: ${response?.error || 'unknown error'}`);
+
+                            const directPdf = await tryExtractRenderedPdfText();
+                            if (directPdf.success) {
+                                appLogger.info('✅ [Preview页面] 已直接使用渲染后的PDF文本完成分析（绕过background）');
+                                finalizePreviewResult(directPdf.text, directPdf.analysis, 'preview-bg-failed-direct-pdf');
+                                return;
+                            }
+
+                            let fallbackText = '';
+                            try {
+                                const iframeTextResult = await new Promise((resolve) => {
+                                    chrome.runtime.sendMessage({ action: 'extractIframeText' }, (res) => {
+                                        if (chrome.runtime.lastError) {
+                                            resolve({ success: false, error: chrome.runtime.lastError.message });
+                                            return;
+                                        }
+                                        resolve(res || { success: false, error: 'empty response' });
+                                    });
+                                });
+
+                                if (iframeTextResult?.success && iframeTextResult.text) {
+                                    fallbackText = String(iframeTextResult.text || '').trim();
+                                }
+                            } catch (e) {
+                                appLogger.warn('⚠️ [Preview页面] 兜底提取iframe文本失败:', e.message);
+                            }
+
+                            const fallbackAnalysis = analyzeDocxContent(fallbackText || '');
+                            finalizePreviewResult(fallbackText || '', {
+                                ...fallbackAnalysis,
+                                title: fallbackAnalysis.title || fileName,
+                                source: 'preview-bg-failed-fallback'
+                            }, 'preview-bg-failed-fallback');
                         }
                     });
                 } else {
@@ -4723,13 +4987,54 @@ window.addEventListener('unhandledrejection', (e) => {
         // 先从共享存储拉取一次，补偿 postMessage 丢失场景
         await pullSharedPreviewResultsFromStorage('提取开始');
 
+        const extractionStartTs = Date.now() - 2 * 60 * 1000;
+        let networkTrackedUrls = [];
+
+        const pullNetworkTrackedUrls = async (reason = 'manual') => {
+            try {
+                const response = await new Promise((resolve) => {
+                    chrome.runtime.sendMessage({
+                        action: 'getTrackedAttachmentUrls',
+                        sinceTs: extractionStartTs,
+                        consume: false
+                    }, (res) => {
+                        if (chrome.runtime.lastError) {
+                            resolve({ success: false, error: chrome.runtime.lastError.message });
+                            return;
+                        }
+                        resolve(res || { success: false, error: 'empty response' });
+                    });
+                });
+
+                if (response?.success && Array.isArray(response.urls)) {
+                    networkTrackedUrls = response.urls
+                        .map((u) => String(u || '').trim())
+                        .filter(Boolean);
+                    if (networkTrackedUrls.length > 0) {
+                        appLogger.info(`🛰️ [网络追踪] ${reason} 拉取到 ${networkTrackedUrls.length} 个候选URL`);
+                    }
+                }
+            } catch (error) {
+                appLogger.debug(`⚠️ [网络追踪] 拉取失败(${reason}): ${error.message}`);
+            }
+        };
+
+        await pullNetworkTrackedUrls('提取开始');
+
         const normalizeUrl = (raw) => {
             if (!raw || typeof raw !== 'string') return null;
-            const trimmed = raw.trim();
+            const trimmed = raw
+                .trim()
+                .replace(/^['"`]+|['"`]+$/g, '')
+                .replace(/&amp;/g, '&');
             if (!trimmed) return null;
             if (trimmed.startsWith('//')) return `${window.location.protocol}${trimmed}`;
             if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
             if (trimmed.startsWith('/')) return `${window.location.origin}${trimmed}`;
+            // 兼容无协议的完整域名链接，如 file.zhihuishu.com/xxx
+            if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|\?|#|$)/i.test(trimmed)) {
+                return `https://${trimmed}`;
+            }
             return null;
         };
 
@@ -4741,6 +5046,19 @@ window.addEventListener('unhandledrejection', (e) => {
             const lower = String(url || '').toLowerCase();
             const pure = lower.split('?')[0].split('#')[0];
             return ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico'].some(ext => pure.endsWith(ext));
+        };
+
+        const isTrustedAttachmentCandidate = (url) => {
+            const lower = String(url || '').toLowerCase();
+            return lower.includes('file.zhihuishu.com') ||
+                lower.includes('aliyuncs.com') ||
+                lower.includes('polymas.com');
+        };
+
+        const extractUrlsFromText = (text) => {
+            if (!text || typeof text !== 'string') return [];
+            const matches = text.match(/https?:\/\/[^\s"'<>]+/gi) || [];
+            return matches.map((u) => normalizeUrl(u)).filter(Boolean);
         };
 
         // 🔍 从 preview/onlinePreview/getCorsFile 链接中提取真实下载URL
@@ -4840,7 +5158,10 @@ window.addEventListener('unhandledrejection', (e) => {
                     return true;
                 }
             } catch (_) {
-                // 非标准URL继续走关键字判断
+                // URL 对象解析失败时，按字符串域名做一次兜底判断。
+                if (isTrustedAttachmentCandidate(url)) {
+                    return true;
+                }
             }
 
             // 🚫 排除看起来像是资源文件的URL
@@ -4890,7 +5211,13 @@ window.addEventListener('unhandledrejection', (e) => {
                             url = extractRealUrlFromPreview(url);
                         }
                         
-                        if (isUsefulFileUrl(url)) candidates.add(url);
+                        if (url) {
+                            const strictUseful = isUsefulFileUrl(url);
+                            const trustedFallback = !strictUseful && isTrustedAttachmentCandidate(url) && !isImageLikeUrl(url);
+                            if (strictUseful || trustedFallback) {
+                                candidates.add(url);
+                            }
+                        }
                     });
                 });
             });
@@ -4921,6 +5248,25 @@ window.addEventListener('unhandledrejection', (e) => {
                 });
             }
 
+            // 添加 background webRequest 追踪到的URL（跨浏览器最终兜底）
+            if (networkTrackedUrls.length > 0) {
+                let networkHit = 0;
+                networkTrackedUrls.forEach((raw) => {
+                    allRawUrls.push(raw);
+                    let normalized = normalizeUrl(raw);
+                    if (normalized && normalized.includes('polymas.com/resource/preview')) {
+                        normalized = extractRealUrlFromPreview(normalized);
+                    }
+                    if (normalized && (isUsefulFileUrl(normalized) || (isTrustedAttachmentCandidate(normalized) && !isImageLikeUrl(normalized)))) {
+                        candidates.add(normalized);
+                        networkHit++;
+                    }
+                });
+                if (networkHit > 0) {
+                    appLogger.info(`🛰️ [URL提取] 从后台网络追踪加入 ${networkHit} 个候选URL`);
+                }
+            }
+
             // 添加从 Performance 资源轨迹中捕获的 URL（用于无跳转/无弹窗的静默预览）
             try {
                 const perfEntries = (performance && typeof performance.getEntriesByType === 'function')
@@ -4947,7 +5293,7 @@ window.addEventListener('unhandledrejection', (e) => {
                         if (normalized && isPreviewTrace) {
                             normalized = extractRealUrlFromPreview(normalized);
                         }
-                        if (normalized && isUsefulFileUrl(normalized)) {
+                        if (normalized && (isUsefulFileUrl(normalized) || (isTrustedAttachmentCandidate(normalized) && !isImageLikeUrl(normalized)))) {
                             candidates.add(normalized);
                         }
                     });
@@ -4972,6 +5318,34 @@ window.addEventListener('unhandledrejection', (e) => {
                 }
             } else {
                 appLogger.info('📎 [URL提取] 页面上没有找到任何URL候选');
+            }
+
+            // Edge/部分站点会把下载地址藏在脚本字符串或资源轨迹中，常规过滤可能拿不到。
+            if (candidates.size === 0) {
+                const trustedFromRaw = allRawUrls
+                    .map((raw) => normalizeUrl(raw))
+                    .filter(Boolean)
+                    .filter((url) => isTrustedAttachmentCandidate(url) && !isImageLikeUrl(url));
+
+                trustedFromRaw.forEach((url) => candidates.add(url));
+
+                if (trustedFromRaw.length > 0) {
+                    appLogger.info(`🛟 [URL提取兜底] 从原始URL字符串补入 ${trustedFromRaw.length} 个可信候选`);
+                }
+            }
+
+            if (candidates.size === 0) {
+                try {
+                    const htmlText = document.documentElement?.outerHTML || '';
+                    const fromHtml = extractUrlsFromText(htmlText)
+                        .filter((url) => isTrustedAttachmentCandidate(url) && !isImageLikeUrl(url));
+                    fromHtml.forEach((url) => candidates.add(url));
+                    if (fromHtml.length > 0) {
+                        appLogger.info(`🛟 [URL提取兜底] 从页面HTML补入 ${fromHtml.length} 个可信候选`);
+                    }
+                } catch (e) {
+                    appLogger.debug(`⚠️ [URL提取兜底] HTML扫描失败: ${e.message}`);
+                }
             }
 
             appLogger.info(`📎 [URL提取] 经过过滤，有 ${candidates.size} 个有效URL`);
@@ -5094,6 +5468,17 @@ window.addEventListener('unhandledrejection', (e) => {
             const scored = candidates.map((url) => {
                 const lower = url.toLowerCase();
                 let score = 0;
+                let parsedPath = '';
+                let hasQuery = false;
+
+                try {
+                    const parsed = new URL(url);
+                    parsedPath = parsed.pathname || '';
+                    hasQuery = !!parsed.search;
+                } catch (_) {
+                    parsedPath = '';
+                    hasQuery = lower.includes('?');
+                }
                 
                 // 🚀 基础分数：受信任域名的URL（可能是真正的下载/预览链接）
                 if (lower.includes('aliyuncs.com') || lower.includes('polymas') || 
@@ -5110,6 +5495,11 @@ window.addEventListener('unhandledrejection', (e) => {
                 // 🎯 无扩展名URL加分（很可能是动态下载链接）
                 if (!lower.match(/\.\w+$/)) {
                     score += 8;
+                }
+
+                // 目录型链接通常不是最终文件，降权但不一票否决。
+                if (parsedPath.endsWith('/')) {
+                    score -= hasQuery ? 2 : 10;
                 }
                 
                 // 文件名匹配（高优先级）
@@ -5978,6 +6368,7 @@ window.addEventListener('unhandledrejection', (e) => {
                     // 定期从共享存储回读，补偿 opener 通知漏接
                     if (waitIdx === 1 || waitIdx % 2 === 0) {
                         await pullSharedPreviewResultsFromStorage(`后置检查第${waitIdx}轮`);
+                        await pullNetworkTrackedUrls(`后置检查第${waitIdx}轮`);
                     }
                     
                     const cacheLen = window._zhsPreviewFileResults?.length || 0;
@@ -6759,6 +7150,17 @@ window.addEventListener('unhandledrejection', (e) => {
     function initAutoGradingFeature() {
         try {
             appLogger.info('🚀 [初始化] 开始初始化自动批改功能...');
+
+        const currentHref = String(window.location.href || '').toLowerCase();
+        const isPreviewRuntimePage = currentHref.includes('/resource/preview') ||
+            currentHref.includes('/resource/onlinepreview') ||
+            currentHref.includes('/resource/getcorsfile');
+
+        // 预览页只负责附件URL/内容提取，不注入浮窗UI，避免影响页面渲染与PDF交互。
+        if (isPreviewRuntimePage) {
+            appLogger.info('ℹ️ [初始化] 当前为预览页面，跳过浮窗与自动批改UI初始化');
+            return;
+        }
         
         // 检查是否已初始化
         if (window.AUTO_GRADING_BUTTON_INITIALIZED) {

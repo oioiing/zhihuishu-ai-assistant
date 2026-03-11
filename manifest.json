@@ -9,34 +9,57 @@
     "desktopCapture",
     "scripting",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "webRequest",
+    "webNavigation",
+    "alarms"
   ],
   "host_permissions": [
     "https://api.deepseek.com/*",
     "https://*.deepseek.com/*",
     "https://api.ocr.space/*",
+    "https://file.zhihuishu.com/*",
+    "https://prod-polymas.oss-cn-hangzhou.aliyuncs.com/*",
     "<all_urls>"
   ],
   "action": {
     "default_title": "智慧树 AI 助教 - 悬浮列表展开版",
-    "default_popup": "popup.html"
+    "default_popup": "src/popup/popup.html",
+    "default_icon": "assets/icons/icon-32.png"
+  },
+  "icons": {
+    "16": "assets/icons/icon-16.png",
+    "32": "assets/icons/icon-32.png",
+    "48": "assets/icons/icon-48.png",
+    "128": "assets/icons/icon-128.png"
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "src/background/background.js"
   },
   "content_scripts": [
     {
       "matches": [
         "https://zhihuishu.com/*",
         "https://www.zhihuishu.com/*",
-        "https://*.zhihuishu.com/*"
+        "https://*.zhihuishu.com/*",
+        "https://hike-teaching-center.polymas.com/*",
+        "https://*.polymas.com/*"
       ],
-      "js": ["content.js"],
+      "js": [
+         "src/content/content-logger.js",
+         "src/content/content-retry.js",
+         "src/content/content-cache.js",
+        "src/content/content-utils.js",
+        "src/content/content-floating-ball.js",
+        "src/content/content-parser.js",
+        "src/content/content-analysis.js",
+        "src/content/content.js"
+      ],
       "run_at": "document_end",
       "all_frames": false
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; connect-src 'self' https://api.deepseek.com https://*.deepseek.com https://api.ocr.space; object-src 'self'"
+    "extension_pages": "script-src 'self'; connect-src 'self' https://api.deepseek.com https://*.deepseek.com https://api.ocr.space https://file.zhihuishu.com https://prod-polymas.oss-cn-hangzhou.aliyuncs.com; object-src 'self'"
   }
 }
