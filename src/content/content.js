@@ -3371,6 +3371,12 @@ window.addEventListener('unhandledrejection', (e) => {
     
     // 使用分析条件生成评语（调用AI批改）
     async function generateCommentWithAnalysisConditions(score, standardAnswer, studentAnswer, customConditions = null) {
+        // 防护：附件标记未能处理时，拒绝把占位符发给 AI
+        if (studentAnswer && studentAnswer.startsWith('[[') && studentAnswer.endsWith(']]')) {
+            appLogger.warn('⚠️ [评语生成] 检测到未处理的附件标记，拒绝调用 AI:', studentAnswer);
+            throw new Error(`附件内容未提取成功（${studentAnswer}），无法自动批改，请手动处理`);
+        }
+
         // 优先使用传入的自定义条件，否则使用全局状态中的条件
         const conditions = customConditions || AUTO_GRADING_STATE.autoGradingConditions;
         
@@ -4307,9 +4313,36 @@ window.addEventListener('unhandledrejection', (e) => {
                         appLogger.info('📄 [自动批改] 学生提交了嵌入文档，尝试提取内容...');
                         studentAnswer = await processIframeDocument();
                     } else if (studentAnswer === '[[DOWNLOAD_LINK_DETECTED]]') {
-                        appLogger.info('🔗 [自动批改] 学生提交了下载链接');
-                        showNotification('❌ 检测到下载附件，请手动下载查看并批改', '#FF5252', 3000);
-                        continue; // 跳过这个学生，进入下一个
+                        appLogger.info('🔗 [自动批改] 学生提交了下载链接，尝试下载并解析附件...');
+                        // 重新查询 DOM 获取真实下载 URL
+                        const dlLinks = document.querySelectorAll('a[href*="download"], a[href*="/file/"], a[title*="下载"]');
+                        const firstLink = dlLinks[0];
+                        if (firstLink) {
+                            const fileUrl = firstLink.href;
+                            const rawName = firstLink.getAttribute('download') ||
+                                decodeURIComponent((fileUrl.split('/').pop() || '').split('?')[0]) ||
+                                'attachment';
+                            const fileName = rawName || 'attachment';
+                            appLogger.info(`📎 [自动批改] 下载附件: ${fileName} <- ${fileUrl.substring(0, 80)}`);
+                            try {
+                                const dlResult = await sendMessage('downloadAndParseAttachment', { fileUrl, fileName });
+                                if (dlResult?.success && dlResult.text) {
+                                    studentAnswer = dlResult.text;
+                                    appLogger.info(`✅ [自动批改] 附件文本提取成功，长度: ${studentAnswer.length}`);
+                                } else {
+                                    appLogger.warn('⚠️ [自动批改] 附件下载解析失败:', dlResult?.error);
+                                    showNotification(`❌ ${student.name} 的附件无法解析（${dlResult?.error || '未知错误'}），已跳过`, '#FF5252', 3000);
+                                    continue;
+                                }
+                            } catch (dlErr) {
+                                appLogger.error('❌ [自动批改] 附件下载异常:', dlErr);
+                                showNotification(`❌ ${student.name} 的附件下载失败，已跳过`, '#FF5252', 3000);
+                                continue;
+                            }
+                        } else {
+                            showNotification('❌ 检测到下载附件但无法获取链接地址，请手动批改', '#FF5252', 3000);
+                            continue;
+                        }
                     }
                     
                     // 如果处理失败，studentAnswer 会是空或错误信息

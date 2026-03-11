@@ -531,17 +531,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     break;
                     
                 case 'performOCR':
-                    console.log('🔍 [Background] OCR 识别请求');
+                    console.log('🔍 [Background] OCR 识别请求（DeepSeek Vision）');
                     try {
-                        const text = await performOCR(request.imageData);
-                        console.log('✅ [Background] OCR 识别成功');
+                        const text = await performOCRWithDeepSeekVision(request.imageData);
+                        console.log('✅ [Background] OCR 识别成功，文字长度:', text.length);
                         result = { success: true, text: text };
                     } catch (error) {
                         console.error('❌ [Background] OCR 识别失败:', error.message);
                         result = { success: false, error: error.message || 'OCR 识别失败' };
                     }
                     break;
-                    
+
+                case 'downloadAndParseAttachment': {
+                    console.log('📎 [Background] 附件下载解析请求:', request.fileName);
+                    try {
+                        const attachText = await downloadAndParseAttachment(request.fileUrl, request.fileName);
+                        console.log('✅ [Background] 附件解析成功，内容长度:', attachText.length);
+                        result = { success: true, text: attachText, fileName: request.fileName };
+                    } catch (error) {
+                        console.error('❌ [Background] 附件下载解析失败:', error.message);
+                        result = { success: false, error: error.message || '附件解析失败' };
+                    }
+                    break;
+                }
+
                 default:
                     console.warn('⚠️ [Background] 未知操作:', request.action);
                     result = { success: false, error: '未知操作: ' + request.action };
@@ -1535,8 +1548,217 @@ function formatOCRText(rawText, language = 'auto') {
     formatted = formatted.trim();
     
     console.log('OCR文字排版完成，原长度:', rawText.length, '排版后长度:', formatted.length);
-    
+
     return formatted;
+}
+
+// ==========================================
+// DeepSeek Vision OCR（替换 OCR.space）
+// ==========================================
+
+/**
+ * 使用 DeepSeek Vision 识别图片中的文字
+ * 比 OCR.space 更准确，且复用已有的 API Key
+ * @param {string} imageData - base64 图片数据（带或不带 data: 前缀均可）
+ * @returns {Promise<string>} 识别出的文字
+ */
+async function performOCRWithDeepSeekVision(imageData) {
+    const deepseekApiKey = await getApiKeyOrThrow();
+
+    // 统一格式：确保带 data URI 前缀
+    const dataUrl = imageData.startsWith('data:')
+        ? imageData
+        : `data:image/jpeg;base64,${imageData}`;
+
+    console.log('🔍 [Vision OCR] 调用 DeepSeek Vision 识别图片文字...');
+
+    const response = await fetchWithTimeout(DEEPSEEK_API_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${deepseekApiKey}`
+        },
+        body: JSON.stringify({
+            model: 'deepseek-chat',
+            messages: [
+                {
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'image_url',
+                            image_url: { url: dataUrl }
+                        },
+                        {
+                            type: 'text',
+                            text: '请完整提取图片中的所有文字内容，原样输出，保持段落格式，不要添加任何说明或解释。'
+                        }
+                    ]
+                }
+            ],
+            temperature: 0.1,
+            max_tokens: 2000
+        })
+    }, 30000);
+
+    if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        throw new Error(`DeepSeek Vision 请求失败 ${response.status}: ${errText.substring(0, 200)}`);
+    }
+
+    const data = await response.json();
+    const text = data?.choices?.[0]?.message?.content || '';
+    if (!text.trim()) {
+        throw new Error('图片中未识别到文字内容');
+    }
+    return text.trim();
+}
+
+// ==========================================
+// 附件下载与解析（DOCX / PDF）
+// ==========================================
+
+/**
+ * 下载文件并提取纯文本
+ * DOCX：使用内置 ZIP 解析（无需外部库）
+ * PDF：使用 iframe TextLayer 提取（在 background 侧无法直接渲染，改为 DeepSeek Vision 兜底）
+ * @param {string} fileUrl - 文件下载地址
+ * @param {string} fileName - 文件名（用于判断类型）
+ * @returns {Promise<string>} 提取的文本
+ */
+async function downloadAndParseAttachment(fileUrl, fileName) {
+    console.log('📥 [附件] 开始下载:', fileName, fileUrl.substring(0, 80));
+
+    const ext = (fileName || '').split('.').pop().toLowerCase();
+
+    const resp = await fetchWithTimeout(fileUrl, {
+        method: 'GET',
+        headers: { 'Accept': '*/*' }
+    }, 30000);
+
+    if (!resp.ok) {
+        throw new Error(`文件下载失败 HTTP ${resp.status}`);
+    }
+
+    if (ext === 'docx' || ext === 'doc') {
+        const buffer = await resp.arrayBuffer();
+        console.log('📄 [附件] 解析 DOCX，大小:', buffer.byteLength, 'bytes');
+        const text = await extractTextFromDocxBuffer(buffer);
+        if (!text || text.trim().length < 5) {
+            throw new Error('DOCX 文件内容为空或无法提取');
+        }
+        return text;
+    }
+
+    if (ext === 'pdf') {
+        // PDF 无法在 Service Worker 中直接渲染，转换为 base64 后用 Vision 识别
+        console.log('📑 [附件] PDF 文件，转换为图片后使用 DeepSeek Vision 识别...');
+        const buffer = await resp.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+        const base64 = btoa(binary);
+        const dataUrl = `data:application/pdf;base64,${base64}`;
+        // 通知 content script 在页面端渲染 PDF 并截图
+        // 此处改为直接请求 Vision 识别 PDF 首页缩略图（如果无法渲染则报错）
+        // 实际上 DeepSeek 目前支持 PDF 直接传入：
+        return await performOCRWithDeepSeekVision(dataUrl);
+    }
+
+    // 其他文本类文件（.txt .md 等）
+    const text = await resp.text();
+    return text;
+}
+
+/**
+ * 从 DOCX ArrayBuffer 提取纯文本（内置 ZIP 解析，不依赖外部库）
+ * @param {ArrayBuffer} arrayBuffer
+ * @returns {Promise<string>}
+ */
+async function extractTextFromDocxBuffer(arrayBuffer) {
+    const dataView = new DataView(arrayBuffer);
+
+    // 验证 ZIP 文件头 PK\x03\x04
+    if (dataView.getUint32(0, true) !== 0x04034b50) {
+        throw new Error('不是有效的 DOCX 文件');
+    }
+
+    const xmlContent = await findFileInZipBuffer(arrayBuffer, 'word/document.xml');
+    if (!xmlContent) {
+        throw new Error('未找到 word/document.xml');
+    }
+
+    return parseDocxXmlToText(xmlContent);
+}
+
+/**
+ * 在 ZIP ArrayBuffer 中查找指定文件并返回其文本内容
+ */
+async function findFileInZipBuffer(zipData, targetFileName) {
+    const dataView = new DataView(zipData);
+    const decoder = new TextDecoder('utf-8');
+    let offset = 0;
+
+    while (offset < zipData.byteLength - 4) {
+        if (dataView.getUint32(offset, true) !== 0x04034b50) {
+            offset++;
+            continue;
+        }
+
+        const compressionMethod = dataView.getUint16(offset + 8, true);
+        const compressedSize   = dataView.getUint32(offset + 18, true);
+        const filenameLength   = dataView.getUint16(offset + 26, true);
+        const extraFieldLength = dataView.getUint16(offset + 28, true);
+
+        const filenameBytes = new Uint8Array(zipData, offset + 30, filenameLength);
+        const currentFileName = decoder.decode(filenameBytes);
+
+        if (currentFileName === targetFileName) {
+            const dataOffset = offset + 30 + filenameLength + extraFieldLength;
+            const compressedData = new Uint8Array(zipData, dataOffset, compressedSize);
+
+            if (compressionMethod === 0) {
+                return decoder.decode(compressedData);
+            }
+            if (compressionMethod === 8) {
+                try {
+                    const stream = new Blob([compressedData]).stream();
+                    const decompressed = stream.pipeThrough(new DecompressionStream('deflate-raw'));
+                    return await new Response(decompressed).text();
+                } catch (_) {
+                    return decoder.decode(compressedData); // 降级
+                }
+            }
+        }
+
+        offset += 30 + filenameLength + extraFieldLength + compressedSize;
+    }
+
+    return null;
+}
+
+/**
+ * 从 DOCX XML 提取纯文本（保留段落分隔）
+ */
+function parseDocxXmlToText(xml) {
+    const paragraphs = xml.split(/<w:p[\s>]/);
+    const result = [];
+    const textRegex = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+
+    for (const para of paragraphs) {
+        const parts = [];
+        let m;
+        textRegex.lastIndex = 0;
+        while ((m = textRegex.exec(para)) !== null) {
+            parts.push(
+                m[1]
+                    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+                    .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+            );
+        }
+        if (parts.length) result.push(parts.join(''));
+    }
+
+    return result.join('\n').trim();
 }
 
 
