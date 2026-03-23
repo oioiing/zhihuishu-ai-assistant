@@ -66,6 +66,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ success: false, error: error.message });
                 });
             return true;
+
+        case 'analyzeHomeworkDOM':
+            analyzeHomeworkDOMWithAI(request.data)
+                .then(response => {
+                    sendResponse({ success: true, data: response });
+                })
+                .catch(error => {
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true;
             
         case 'analyzeHomework':
             analyzeHomeworkWithAI(request.imageData, request.selectionInfo)
@@ -170,6 +180,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ error: 'Unknown action type' });
     }
 });
+
+// 实现缺失的 analyzeHomeworkWithAI 函数
+async function analyzeHomeworkWithAI(imageData, selectionInfo) {
+    return analyzeImageWithAI(imageData);
+}
+
+// DOM 文本分析函数
+async function analyzeHomeworkDOMWithAI(data) {
+    const { standardAnswer, studentAnswer, title } = data;
+    const combinedText = `
+作业标题: ${title || '未知'}
+【参考答案】
+${standardAnswer || '未提供'}
+
+【学生作答】
+${studentAnswer}
+    `.trim();
+
+    console.log('开始 DOM 文本 AI 分析...');
+    return analyzeTextContent(combinedText);
+}
 
 // 简化的屏幕截图函数
 async function captureScreenSimple() {
