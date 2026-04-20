@@ -14,13 +14,13 @@
     // 接收来自 popup 或 background 的消息
     chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         console.log('📨 收到消息:', req);
-        
+
         if (req && req.action === 'ping') {
             console.log('🏓 处理ping请求');
             sendResponse({ success: true, message: 'pong' });
             return true;
         }
-        
+
         // 新增：页面摘要功能
         if (req && req.action === 'summarizePage') {
             console.log('📄 收到页面摘要请求');
@@ -31,20 +31,20 @@
                     contentLength: readableContent.content.length,
                     wordCount: readableContent.wordCount
                 });
-                sendResponse({ 
-                    success: true, 
-                    data: readableContent 
+                sendResponse({
+                    success: true,
+                    data: readableContent
                 });
             } catch (error) {
                 console.error('❌ 页面内容提取失败:', error);
-                sendResponse({ 
-                    success: false, 
-                    error: error.message || '页面内容提取失败，请刷新页面后重试' 
+                sendResponse({
+                    success: false,
+                    error: error.message || '页面内容提取失败，请刷新页面后重试'
                 });
             }
             return true;
         }
-        
+
         return false;
     });
 
@@ -53,7 +53,7 @@
     // ==========================================
     function injectStyles(){
         if (document.getElementById('zhihuishu-ai-styles')) return;
-        const s = document.createElement('style'); 
+        const s = document.createElement('style');
         s.id = 'zhihuishu-ai-styles';
         s.textContent = `
             /* 悬浮球基础样式 */
@@ -217,13 +217,13 @@
             }
 
             @keyframes zh-slide-up {
-                from { 
-                    opacity: 0; 
-                    transform: translate(-50%, -40%); 
+                from {
+                    opacity: 0;
+                    transform: translate(-50%, -40%);
                 }
-                to { 
-                    opacity: 1; 
-                    transform: translate(-50%, -50%); 
+                to {
+                    opacity: 1;
+                    transform: translate(-50%, -50%);
                 }
             }
 
@@ -250,25 +250,25 @@
     // ==========================================
     // 2. 核心组件构建 (Floating Ball & List)
     // ==========================================
-    
+
     function createFloatingBall(){
         try {
-            const old = document.getElementById('zhihuishu-ai-floating-ball'); 
+            const old = document.getElementById('zhihuishu-ai-floating-ball');
             if(old) old.remove();
             injectStyles();
 
             // --- 主球体 ---
-            const ball = document.createElement('div'); 
+            const ball = document.createElement('div');
             ball.id = 'zhihuishu-ai-floating-ball';
             ball.className = 'zh-floating-ball';
-            
+
             // --- 状态指示环 ---
             const ring = document.createElement('div');
             ring.id = 'zh-status-ring';
             ring.className = 'zh-status-ring';
             ring.style.cssText = `
                 position: absolute; width: 56px; height: 56px; border-radius: 50%; pointer-events: none;
-                border: 2px solid transparent; border-top-color: #FF6B6B; border-right-color: #66BB6A; 
+                border: 2px solid transparent; border-top-color: #FF6B6B; border-right-color: #66BB6A;
                 border-bottom-color: #AB47BC; border-left-color: #4FC3F7;
             `;
             ball.appendChild(ring);
@@ -282,18 +282,19 @@
 
             // 点击事件
             ball.addEventListener('click', toggleExpand);
-            
+
             // 拖拽逻辑
             makeDraggable(ball);
             document.body.appendChild(ball);
 
-        } catch(err) { 
-            console.error('悬浮球创建失败:', err); 
+        } catch(err) {
+            console.error('悬浮球创建失败:', err);
         }
     }
 
     function createFunctionList(){
         const functions = [
+            { id: 'domGrading', icon: '📝', text: 'DOM 阅卷', color: '#6366F1' },
             { id: 'screenshot', icon: '📸', text: '截图批改', color: '#FF6B6B' },
             { id: 'autoDetect', icon: '🎯', text: '智能识别作业', color: '#FF9800' },
             { id: 'chat', icon: '💬', text: 'AI对话', color: '#66BB6A' },
@@ -313,7 +314,7 @@
                 <span class="icon">${func.icon}</span>
                 <span class="text">${func.text}</span>
             `;
-            
+
             // 添加stagger动画延迟
             setTimeout(() => {
                 item.classList.add('show');
@@ -333,7 +334,7 @@
     function toggleExpand(){
         const ball = document.getElementById('zhihuishu-ai-floating-ball');
         const icon = document.getElementById('zh-ball-icon');
-        
+
         if (!isExpanded) {
             // 展开列表
             showFunctionList();
@@ -353,10 +354,10 @@
 
     function showFunctionList(){
         if (currentFunctionList) return;
-        
+
         currentFunctionList = createFunctionList();
         document.body.appendChild(currentFunctionList);
-        
+
         // 触发展开动画
         setTimeout(() => {
             currentFunctionList.classList.add('show');
@@ -370,10 +371,10 @@
 
     function hideFunctionList(){
         if (!currentFunctionList) return;
-        
+
         currentFunctionList.classList.remove('show');
         currentFunctionList.classList.add('hide');
-        
+
         setTimeout(() => {
             if (currentFunctionList) {
                 currentFunctionList.remove();
@@ -387,7 +388,7 @@
     function handleOutsideClick(e){
         const ball = document.getElementById('zhihuishu-ai-floating-ball');
         const list = document.getElementById('zh-function-list');
-        
+
         if (!ball.contains(e.target) && (!list || !list.contains(e.target))) {
             toggleExpand();
         }
@@ -395,44 +396,44 @@
 
     function makeDraggable(el){
         let dragging = false, startX = 0, startY = 0, initialX = 0, initialY = 0;
-        
-        el.addEventListener('mousedown', (e) => { 
-            dragging = true; 
-            startX = e.clientX; 
-            startY = e.clientY; 
-            const rect = el.getBoundingClientRect(); 
-            initialX = rect.left; 
-            initialY = rect.top; 
-            el.style.transition = 'none'; 
-            e.preventDefault(); 
+
+        el.addEventListener('mousedown', (e) => {
+            dragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            const rect = el.getBoundingClientRect();
+            initialX = rect.left;
+            initialY = rect.top;
+            el.style.transition = 'none';
+            e.preventDefault();
         });
-        
-        document.addEventListener('mousemove', (e) => { 
-            if (!dragging) return; 
+
+        document.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
             const newX = initialX + (e.clientX - startX);
             const newY = initialY + (e.clientY - startY);
-            el.style.left = newX + 'px'; 
-            el.style.top = newY + 'px'; 
-            el.style.right = 'auto'; 
+            el.style.left = newX + 'px';
+            el.style.top = newY + 'px';
+            el.style.right = 'auto';
         });
-        
-        document.addEventListener('mouseup', () => { 
-            dragging = false; 
-            el.style.transition = ''; 
+
+        document.addEventListener('mouseup', () => {
+            dragging = false;
+            el.style.transition = '';
         });
     }
     // ==========================================
     // 3. 状态管理 (Animations)
     // ==========================================
-    function animateRingStart(colorCode){ 
+    function animateRingStart(colorCode){
         const ring = document.getElementById('zh-status-ring');
         if(ring) {
             ring.classList.add('active');
             if(colorCode) ring.style.borderTopColor = colorCode;
         }
     }
-    
-    function animateRingStop(){ 
+
+    function animateRingStop(){
         const ring = document.getElementById('zh-status-ring');
         if(ring) {
             ring.classList.remove('active');
@@ -444,10 +445,10 @@
     // 4. 面板系统
     // ==========================================
     function showFloatingPanel(title, color, contentHTML){
-        const old = document.getElementById('zhihuishu-ai-panel'); 
+        const old = document.getElementById('zhihuishu-ai-panel');
         if(old) old.remove();
 
-        const panel = document.createElement('div'); 
+        const panel = document.createElement('div');
         panel.id = 'zhihuishu-ai-panel';
         panel.className = 'zh-panel-entry';
         panel.style.cssText = `
@@ -484,17 +485,17 @@
         document.body.appendChild(panel);
 
         // 关闭逻辑
-        document.getElementById('zh-close-btn').onclick = () => { 
-            panel.remove(); 
-            animateRingStop(); 
+        document.getElementById('zh-close-btn').onclick = () => {
+            panel.remove();
+            animateRingStop();
         };
-        
+
         // 点击外部关闭
         setTimeout(() => {
             document.addEventListener('click', function onOutClick(e){
                 if(!panel.contains(e.target) && !document.getElementById('zhihuishu-ai-floating-ball').contains(e.target)){
-                    panel.remove(); 
-                    animateRingStop(); 
+                    panel.remove();
+                    animateRingStop();
                     document.removeEventListener('click', onOutClick);
                 }
             });
@@ -511,43 +512,49 @@
     // ==========================================
     function handleFunctionClick(id, color){
         console.log('点击功能:', id);
-        
+
         // 收起列表
         if (isExpanded) {
             toggleExpand();
         }
-        
+
         switch(id){
+            case 'domGrading':
+                animateRingStart(color);
+                showFloatingPanel('DOM 自动阅卷', color, '🔍 正在提取页面内容...');
+                handleDomGrading();
+                break;
+
             case 'screenshot':
                 animateRingStart(color);
                 showFloatingPanel('截图批改', color, '📸 准备截图...');
                 setTimeout(activateScreenshotMode, 300);
                 break;
-            
+
             case 'autoDetect':
                 animateRingStart(color);
                 showFloatingPanel('智能识别作业', color, '🎯 正在智能识别页面作业区域...');
                 handleAutoDetectHomework();
                 break;
-                
+
             case 'chat':
                 animateRingStart(color);
                 showFloatingPanel('AI 助教对话', color, renderChatUI());
                 initChatEvents();
                 break;
-                
+
             case 'analyze':
                 animateRingStart(color);
                 showFloatingPanel('页面智能分析', color, '📊 正在读取页面内容...');
                 handlePageAnalysis();
                 break;
-                
+
             case 'knowledge':
                 animateRingStart(color);
                 showFloatingPanel('知识图谱构建', color, '🔍 正在提取核心概念...');
                 handleKnowledgeGraph();
                 break;
-                
+
             case 'summarize':
                 animateRingStart(color);
                 showFloatingPanel('智能页面摘要', color, '📄 正在提取页面内容...');
@@ -558,7 +565,145 @@
     // ==========================================
     // 6. 功能实现
     // ==========================================
-    
+
+    // --- DOM 阅卷 ---
+    function handleDomGrading() {
+        console.log('开始 DOM 自动阅卷...');
+        const homeworkData = extractHomeworkDataFromDOM();
+
+        if (!homeworkData.studentAnswer) {
+            updatePanelBody('<div style="color:red;padding:10px;">❌ 未能识别到学生答案，请确保当前在批改页面。</div>');
+            animateRingStop();
+            return;
+        }
+
+        updatePanelBody(`
+            <div style="padding:10px;">
+                <div style="margin-bottom:10px; font-size:13px; color:#666;">
+                    ✅ 提取成功，正在由 AI 进行分析评分...
+                </div>
+                <div style="background:#f3f4f6; padding:10px; border-radius:8px; font-size:12px; max-height:100px; overflow-y:auto; margin-bottom:10px;">
+                    <strong>标准答案预览:</strong><br>${homeworkData.standardAnswer.substring(0, 100)}...
+                </div>
+                <div style="background:#f3f4f6; padding:10px; border-radius:8px; font-size:12px; max-height:100px; overflow-y:auto;">
+                    <strong>学生答案预览:</strong><br>${homeworkData.studentAnswer.substring(0, 100)}...
+                </div>
+            </div>
+        `);
+
+        chrome.runtime.sendMessage({ action: 'analyzeHomeworkText', homeworkData }, (res) => {
+            if (res && res.success) {
+                displayDomGradingResult(res.data);
+            } else {
+                updatePanelBody(`<div style="color:red;padding:10px;">❌ AI 分析失败: ${res ? res.error : '未知错误'}</div>`);
+            }
+            animateRingStop();
+        });
+    }
+
+    function extractHomeworkDataFromDOM() {
+        const standardAnswerSelectors = ['.reference-answer', '.standard-answer', '.ans-box', '[class*="answer-content"]'];
+        const studentAnswerSelectors = ['.break-all.break-words', '.answer-box', '.markdown-latex-container', '.evaluation-content', '[class*="student-work"]'];
+
+        const getCleanText = (selector) => {
+            for (const s of selector) {
+                const el = document.querySelector(s);
+                if (el) {
+                    const clone = el.cloneNode(true);
+                    // 移除不需要的内容
+                    clone.querySelectorAll('button, script, style, input, .zh-floating-ball').forEach(e => e.remove());
+                    return clone.innerText.trim();
+                }
+            }
+            return '';
+        };
+
+        const standardAnswer = getCleanText(standardAnswerSelectors);
+        const studentAnswer = getCleanText(studentAnswerSelectors);
+
+        console.log('DOM 提取结果:', { standardLength: standardAnswer.length, studentLength: studentAnswer.length });
+        return { standardAnswer, studentAnswer };
+    }
+
+    function displayDomGradingResult(data) {
+        const html = `
+            <div style="padding:10px;">
+                <div style="background:#EEF2FF; border-radius:12px; padding:16px; margin-bottom:16px; border-left:4px solid #6366F1;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                        <span style="font-weight:600; color:#4F46E5;">📊 AI 评分结果</span>
+                        <span style="font-size:24px; font-weight:bold; color:#6366F1;">${data.score}分</span>
+                    </div>
+                    <div style="font-size:14px; color:#374151; white-space:pre-wrap; line-height:1.6;">${data.feedback}</div>
+                </div>
+
+                <button id="zh-auto-fill-btn" style="
+                    width:100%; padding:12px; background:#6366F1; color:white; border:none;
+                    border-radius:10px; cursor:pointer; font-weight:600; transition:all 0.2s;
+                ">🪄 自动填充到页面</button>
+            </div>
+        `;
+
+        updatePanelBody(html);
+
+        const btn = document.getElementById('zh-auto-fill-btn');
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            const success = autoFillGradeAndComment(data.score, data.feedback);
+            if (success) {
+                btn.textContent = '✅ 填充完成';
+                btn.style.background = '#10B981';
+                btn.disabled = true;
+            } else {
+                alert('未能在页面上找到评分输入框，请确保您已打开批改面板。');
+            }
+        };
+    }
+
+    function autoFillGradeAndComment(score, comment) {
+        const scoreInputSelectors = [
+            'input[placeholder*="成绩"]',
+            'input.el-input__inner[type="number"]',
+            '.score-input input',
+            'input[aria-label*="成绩"]'
+        ];
+
+        const commentSelectors = [
+            'textarea.el-textarea__inner',
+            'textarea[placeholder*="评语"]',
+            '.comment-box textarea',
+            'textarea[aria-label*="评语"]'
+        ];
+
+        let scoreFilled = false;
+        let commentFilled = false;
+
+        // 填充得分
+        for (const s of scoreInputSelectors) {
+            const el = document.querySelector(s);
+            if (el && el.offsetParent !== null) {
+                el.value = score;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                scoreFilled = true;
+                break;
+            }
+        }
+
+        // 填充评语
+        for (const s of commentSelectors) {
+            const el = document.querySelector(s);
+            if (el && el.offsetParent !== null) {
+                el.value = comment;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                commentFilled = true;
+                break;
+            }
+        }
+
+        return scoreFilled || commentFilled;
+    }
+
     // --- 聊天功能 ---
     function renderChatUI(){
         return `
@@ -569,7 +714,7 @@
                     </div>
                 </div>
                 <div style="display:flex; gap:8px;">
-                    <input id="zh-chat-input" type="text" placeholder="输入你的问题..." 
+                    <input id="zh-chat-input" type="text" placeholder="输入你的问题..."
                         style="flex:1; padding:10px; border:1px solid #e5e7eb; border-radius:8px; outline:none;">
                     <button id="zh-chat-send" style="background:#66BB6A; color:white; border:none; padding:0 20px; border-radius:8px; cursor:pointer; font-weight:600;">发送</button>
                 </div>
@@ -585,7 +730,7 @@
         const doSend = () => {
             const msg = input.value.trim();
             if(!msg) return;
-            
+
             // 用户消息
             box.innerHTML += `<div style="text-align:right; margin-bottom:10px;"><span style="background:#4A6FA5; color:white; padding:8px 12px; border-radius:12px 12px 0 12px; display:inline-block; max-width:80%; text-align:left;">${msg}</span></div>`;
             input.value = '';
@@ -600,7 +745,7 @@
             chrome.runtime.sendMessage({ action: 'callDeepSeekAPI', message: msg }, (res) => {
                 const loader = document.getElementById(loadingId);
                 if(loader) loader.remove();
-                
+
                 const reply = (res && res.success) ? res.data : '⚠️ 连接服务器失败，请检查 API Key。';
                 box.innerHTML += `<div style="text-align:left; margin-bottom:10px;"><span style="background:#f3f4f6; color:#374151; padding:8px 12px; border-radius:12px 12px 12px 0; display:inline-block; max-width:90%;">${reply}</span></div>`;
                 box.scrollTop = box.scrollHeight;
@@ -608,8 +753,8 @@
         };
 
         btn.onclick = doSend;
-        input.addEventListener('keypress', (e) => { 
-            if(e.key === 'Enter') doSend(); 
+        input.addEventListener('keypress', (e) => {
+            if(e.key === 'Enter') doSend();
         });
         input.focus();
     }
@@ -618,12 +763,12 @@
     function handlePageAnalysis(){
         const content = document.body.innerText.substring(0, 2000);
         console.log('🔍 开始页面分析，内容长度:', content.length);
-        
+
         // 添加超时处理
         // ✅ 修改版：给 AI 30秒时间，且超时后不再瞎编它是英语课
         const timeoutId = setTimeout(() => {
             console.log('⏰ 页面分析响应超时 (30s)');
-            
+
             const timeoutHtml = `
                 <div style="text-align: center; padding: 30px 10px; color: #64748b;">
                     <div style="font-size: 24px; margin-bottom: 10px;">⏳</div>
@@ -637,7 +782,7 @@
                     </div>
                 </div>
             `;
-            
+
             // 只有当还在转圈圈（loading）的时候，才显示超时提示
             // 防止 AI 已经正在返回数据的路上，结果被我们截胡了
             const loadingEl = document.querySelector('.spinner'); // 假设你的转圈元素有这个类名，如果没有可以去掉这行判断
@@ -645,19 +790,19 @@
                 updatePanelBody(timeoutHtml);
                 animateRingStop();
             }
-            
+
         }, 30000); // 🔴 改成 30000 (30秒)
-        
+
         chrome.runtime.sendMessage({ action:'analyzePageContent', content }, (res) => {
             clearTimeout(timeoutId); // 清除超时
             console.log('📊 页面分析响应:', res);
-            
+
             if(res && res.success){
                 const data = res.data || {};
-                const keywords = (data.keywords || []).map(k => 
+                const keywords = (data.keywords || []).map(k =>
                     `<span style="background:#e0f2fe; color:#0284c7; padding:2px 8px; border-radius:12px; font-size:12px; margin:0 4px 4px 0; display:inline-block;">${Array.isArray(k) ? k[0] : k}</span>`
                 ).join('');
-                
+
                 let html = `
                     <div style="margin-bottom:16px;">
                         <h4 style="margin:0 0 8px 0; color:#1e293b;">📌 核心关键词</h4>
@@ -681,7 +826,7 @@
     function handleKnowledgeGraph(){
         console.log('🔍 开始构建知识图谱...');
         updatePanelBody('<div style="text-align:center; padding:20px;">🔍 正在构建知识图谱...</div>');
-        
+
         // 添加超时处理
         const timeoutId = setTimeout(() => {
             console.log('⏰ 知识图谱构建超时，使用备用结果');
@@ -716,18 +861,18 @@
             updatePanelBody(fallbackHtml);
             animateRingStop();
         }, 3000); // 3秒超时
-        
-        chrome.runtime.sendMessage({ 
-            action: 'buildKnowledgeGraph', 
-            url: window.location.href 
+
+        chrome.runtime.sendMessage({
+            action: 'buildKnowledgeGraph',
+            url: window.location.href
         }, (response) => {
             clearTimeout(timeoutId); // 清除超时
             console.log('📊 知识图谱响应:', response);
-            
+
             if (response && response.success) {
                 const data = response.data;
                 console.log('✅ 知识图谱构建成功:', data);
-                
+
                 const html = `
                     <div style="margin-bottom:16px;">
                         <h4 style="margin:0 0 8px 0; color:#1e293b;">🔍 知识图谱分析</h4>
@@ -738,7 +883,7 @@
                     <div style="display:flex; justify-content:center; align-items:center; height:300px; background:#fafafa; border-radius:8px; position:relative; overflow:hidden;">
                         <!-- 模拟知识图谱可视化 -->
                         <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:60px; height:60px; background:#AB47BC; color:white; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; z-index:2; box-shadow:0 4px 10px rgba(171, 71, 188, 0.4);">${data.metadata.title.substring(0, 4)}</div>
-                        
+
                         ${data.nodes.filter(n => n.type === 'keyword').slice(0, 4).map((node, i) => {
                             const positions = [
                                 { top: '20%', left: '20%' },
@@ -749,7 +894,7 @@
                             const pos = positions[i] || positions[0];
                             return `<div style="position:absolute; ${Object.entries(pos).map(([k,v]) => `${k}:${v}`).join(';')}; width:40px; height:40px; background:#E1BEE7; color:#4a148c; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:10px;">${node.label.substring(0, 3)}</div>`;
                         }).join('')}
-                        
+
                         <!-- 连线 -->
                         <div style="position:absolute; width:100px; height:1px; background:#ddd; top:35%; left:35%; transform:rotate(45deg);"></div>
                         <div style="position:absolute; width:100px; height:1px; background:#ddd; top:35%; right:35%; transform:rotate(-45deg);"></div>
@@ -759,7 +904,7 @@
                     <div style="margin-top:12px;">
                         <h4 style="margin:0 0 8px 0; color:#1e293b;">📊 关键概念</h4>
                         <div style="display:flex; flex-wrap:wrap; gap:6px;">
-                            ${data.nodes.filter(n => n.type === 'keyword').slice(0, 8).map(node => 
+                            ${data.nodes.filter(n => n.type === 'keyword').slice(0, 8).map(node =>
                                 `<span style="background:#f3e8ff; color:#7c3aed; padding:4px 8px; border-radius:12px; font-size:12px;">${node.label}</span>`
                             ).join('')}
                         </div>
@@ -776,38 +921,38 @@
 
     // --- 截图工具 ---
     function activateScreenshotMode(){
-        const panel = document.getElementById('zhihuishu-ai-panel'); 
+        const panel = document.getElementById('zhihuishu-ai-panel');
         if(panel) panel.style.display='none';
-        
+
         // 创建截图选择界面
         createScreenshotSelector();
     }
-    
+
     function createScreenshotSelector() {
         // 创建遮罩层
         const overlay = document.createElement('div');
         overlay.id = 'zh-screen-mask';
         overlay.style.cssText = `
-            position: fixed; 
-            inset: 0; 
-            background: rgba(0,0,0,0.4); 
-            z-index: 2147483648; 
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            z-index: 2147483648;
             cursor: crosshair;
             user-select: none;
         `;
-        
+
         // 创建选择框
         const selectionBox = document.createElement('div');
         selectionBox.id = 'zh-selection-box';
         selectionBox.style.cssText = `
-            position: absolute; 
-            border: 2px solid #FF6B6B; 
-            background: rgba(255, 107, 107, 0.1); 
-            display: none; 
+            position: absolute;
+            border: 2px solid #FF6B6B;
+            background: rgba(255, 107, 107, 0.1);
+            display: none;
             pointer-events: none;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.3);
         `;
-        
+
         // 创建提示信息
         const hint = document.createElement('div');
         hint.style.cssText = `
@@ -824,7 +969,7 @@
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         `;
         hint.textContent = '📸 拖拽选择要批改的区域，然后松开鼠标';
-        
+
         overlay.appendChild(selectionBox);
         overlay.appendChild(hint);
         document.body.appendChild(overlay);
@@ -846,7 +991,7 @@
 
         const onMouseMove = (e) => {
             if (!isSelecting || !startPoint) return;
-            
+
             const currentPoint = { x: e.clientX, y: e.clientY };
             const left = Math.min(startPoint.x, currentPoint.x);
             const top = Math.min(startPoint.y, currentPoint.y);
@@ -857,16 +1002,16 @@
             selectionBox.style.top = top + 'px';
             selectionBox.style.width = width + 'px';
             selectionBox.style.height = height + 'px';
-            
+
             // 更新选择区域信息
             selectionRect = { left, top, width, height };
         };
 
         const onMouseUp = (e) => {
             if (!isSelecting || !selectionRect) return;
-            
+
             isSelecting = false;
-            
+
             // 检查选择区域大小
             if (selectionRect.width < 50 || selectionRect.height < 50) {
                 showError('选择区域太小，请选择更大的区域');
@@ -874,11 +1019,11 @@
                 showPanel();
                 return;
             }
-            
+
             // 移除选择界面
             overlay.remove();
             showPanel();
-            
+
             // 开始截图和分析流程
             captureSelectedArea(selectionRect);
         };
@@ -896,18 +1041,18 @@
         overlay.addEventListener('mousemove', onMouseMove);
         overlay.addEventListener('mouseup', onMouseUp);
         document.addEventListener('keydown', onKeyDown);
-        
+
         function showPanel() {
             const panel = document.getElementById('zhihuishu-ai-panel');
             if (panel) panel.style.display = 'block';
         }
-        
+
         function showError(message) {
             updatePanelBody(`<div style="color:red;">❌ ${message}</div>`);
             animateRingStop();
         }
     }
-    
+
     function captureSelectedArea(rect) {
         updatePanelBody(`
             <div style="text-align:center; padding:20px;">
@@ -917,7 +1062,7 @@
                 </div>
             </div>
         `);
-        
+
         // 截取整个页面
         chrome.runtime.sendMessage({ action: 'captureScreen' }, (response) => {
             if (response && response.success) {
@@ -925,10 +1070,10 @@
                 cropImageArea(response.data, rect)
                     .then(croppedImage => {
                         updatePanelBody('<div style="text-align:center; padding:20px;">🤖 AI正在分析作业内容...</div>');
-                        
+
                         // 发送裁剪后的图片进行AI分析
-                        chrome.runtime.sendMessage({ 
-                            action: 'analyzeHomework', 
+                        chrome.runtime.sendMessage({
+                            action: 'analyzeHomework',
                             imageData: croppedImage,
                             selectionInfo: rect
                         }, (analysisResponse) => {
@@ -958,7 +1103,7 @@
             }
         });
     }
-    
+
     function cropImageArea(imageDataUrl, rect) {
         return new Promise((resolve, reject) => {
             const img = new Image();
@@ -966,14 +1111,14 @@
                 try {
                     const canvas = document.createElement('canvas');
                     const ctx = canvas.getContext('2d');
-                    
+
                     // 设置画布大小为选择区域大小
                     canvas.width = rect.width;
                     canvas.height = rect.height;
-                    
+
                     // 计算设备像素比
                     const devicePixelRatio = window.devicePixelRatio || 1;
-                    
+
                     // 裁剪图片
                     ctx.drawImage(
                         img,
@@ -986,7 +1131,7 @@
                         rect.width,
                         rect.height
                     );
-                    
+
                     // 转换为base64
                     const croppedDataUrl = canvas.toDataURL('image/png', 0.9);
                     resolve(croppedDataUrl);
@@ -998,7 +1143,7 @@
             img.src = imageDataUrl;
         });
     }
-    
+
     function displayHomeworkAnalysis(analysisData, croppedImage) {
         const html = `
             <div style="max-height:500px; overflow-y:auto; padding:10px;">
@@ -1007,7 +1152,7 @@
                     <div style="font-weight:600; margin-bottom:8px;">📸 截图内容</div>
                     <img src="${croppedImage}" style="max-width:100%; max-height:200px; border:1px solid #ddd; border-radius:4px;">
                 </div>
-                
+
                 <!-- AI分析结果 -->
                 <div style="background:#fff; border-radius:8px; border:1px solid #e5e7eb;">
                     <div style="background:#FF6B6B; color:white; padding:12px; border-radius:8px 8px 0 0; font-weight:600;">
@@ -1017,7 +1162,7 @@
                         ${analysisData}
                     </div>
                 </div>
-                
+
                 <!-- 操作按钮 -->
                 <div style="margin-top:16px; text-align:center; display:flex; gap:8px; justify-content:center;">
                     <button onclick="window.zhScreenshotAgain()" style="background:#4CAF50; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:12px;">
@@ -1029,14 +1174,14 @@
                 </div>
             </div>
         `;
-        
+
         updatePanelBody(html);
-        
+
         // 添加全局函数
         window.zhScreenshotAgain = () => {
             activateScreenshotMode();
         };
-        
+
         window.zhSaveAnalysis = () => {
             // 创建下载链接
             const content = `智慧树AI助教 - 作业批改报告\n生成时间: ${new Date().toLocaleString()}\n\n${analysisData}`;
@@ -1063,7 +1208,7 @@
     // ==========================================
     // 8. Readability 页面内容提取
     // ==========================================
-    
+
     function extractReadableContent() {
         console.log('🔍 开始提取页面可读内容...');
         console.log('📄 页面基本信息:', {
@@ -1072,18 +1217,18 @@
             hasBody: !!document.body,
             bodyTextLength: document.body ? (document.body.innerText || '').length : 0
         });
-        
+
         try {
             // 克隆文档以避免修改原始页面
             const documentClone = document.cloneNode(true);
-            
+
             // 移除不需要的元素
             const elementsToRemove = [
                 'script', 'style', 'nav', 'header', 'footer', 'aside',
                 '.advertisement', '.ads', '.sidebar', '.menu', '.navigation',
                 '.social', '.share', '.comment', '.related', '.popup'
             ];
-            
+
             elementsToRemove.forEach(selector => {
                 try {
                     const elements = documentClone.querySelectorAll(selector);
@@ -1092,7 +1237,7 @@
                     console.log('移除元素失败:', selector, e.message);
                 }
             });
-            
+
             // 查找主要内容区域
             const contentSelectors = [
                 'main', 'article', '[role="main"]',
@@ -1100,11 +1245,11 @@
                 '.post-content', '.entry-content', '.article-content',
                 '.page-content', '.text-content'
             ];
-            
+
             let mainContent = null;
             let contentText = '';
             let title = document.title || '';
-            
+
             // 尝试找到主要内容区域
             for (const selector of contentSelectors) {
                 try {
@@ -1117,20 +1262,20 @@
                     console.log('查找内容区域失败:', selector, e.message);
                 }
             }
-            
+
             // 如果没有找到特定的内容区域，使用整个body
             if (!mainContent) {
                 mainContent = documentClone.body || document.body;
             }
-            
+
             if (mainContent) {
                 // 提取文本内容
                 contentText = extractTextFromElement(mainContent);
-                
+
                 // 清理和格式化文本
                 contentText = cleanText(contentText);
             }
-            
+
             // 如果提取的内容太少，使用原始页面的文本内容
             if (!contentText || contentText.length < 100) {
                 console.log('提取内容太少，使用备用方法...');
@@ -1143,10 +1288,10 @@
                     contentText = '页面内容提取遇到问题，请刷新页面后重试';
                 }
             }
-            
+
             // 提取元数据
             const metadata = extractMetadata(document);
-            
+
             const result = {
                 title: title,
                 content: contentText,
@@ -1156,18 +1301,18 @@
                 url: window.location.href,
                 extractedAt: new Date().toISOString()
             };
-            
+
             console.log('✅ 页面内容提取完成:', {
                 title: result.title,
                 textLength: result.textLength,
                 wordCount: result.wordCount
             });
-            
+
             return result;
-            
+
         } catch (error) {
             console.error('❌ 页面内容提取失败:', error);
-            
+
             // 备用提取方法
             let fallbackContent = '';
             try {
@@ -1182,7 +1327,7 @@
                 console.error('备用内容提取也失败:', fallbackError);
                 fallbackContent = '页面内容提取遇到严重问题，请检查页面是否正常加载';
             }
-            
+
             const cleanedContent = cleanText(fallbackContent);
             return {
                 title: document.title || '未知页面',
@@ -1195,11 +1340,11 @@
             };
         }
     }
-    
+
     function extractTextFromElement(element) {
         try {
             let text = '';
-            
+
             // 简化的文本提取方法
             if (element.innerText) {
                 text = element.innerText;
@@ -1214,18 +1359,18 @@
                         acceptNode: function(node) {
                             const parent = node.parentElement;
                             if (!parent) return NodeFilter.FILTER_REJECT;
-                            
+
                             // 跳过不需要的标签
                             const tagName = parent.tagName.toLowerCase();
                             if (['script', 'style', 'noscript'].includes(tagName)) {
                                 return NodeFilter.FILTER_REJECT;
                             }
-                            
+
                             return NodeFilter.FILTER_ACCEPT;
                         }
                     }
                 );
-                
+
                 let node;
                 while (node = walker.nextNode()) {
                     const nodeText = node.textContent.trim();
@@ -1234,18 +1379,18 @@
                     }
                 }
             }
-            
+
             return text;
-            
+
         } catch (error) {
             console.error('文本提取失败:', error);
             return element.textContent || element.innerText || '';
         }
     }
-    
+
     function cleanText(text) {
         if (!text) return '';
-        
+
         try {
             return text
                 // 合并多个空格
@@ -1262,18 +1407,18 @@
             return text.trim();
         }
     }
-    
+
     function extractMetadata(doc) {
         try {
             const metadata = {};
-            
+
             // 提取基本元数据
             const metaTags = doc.querySelectorAll('meta');
             metaTags.forEach(meta => {
                 try {
                     const name = meta.getAttribute('name') || meta.getAttribute('property');
                     const content = meta.getAttribute('content');
-                    
+
                     if (name && content) {
                         metadata[name] = content;
                     }
@@ -1281,20 +1426,20 @@
                     // 忽略单个meta标签的错误
                 }
             });
-            
+
             // 提取特定的有用信息
             try {
                 const author = doc.querySelector('meta[name="author"]')?.getAttribute('content') ||
                               doc.querySelector('[rel="author"]')?.textContent ||
                               doc.querySelector('.author')?.textContent;
-                
+
                 const publishDate = doc.querySelector('meta[name="date"]')?.getAttribute('content') ||
                                    doc.querySelector('time')?.getAttribute('datetime') ||
                                    doc.querySelector('.date')?.textContent;
-                
+
                 const description = doc.querySelector('meta[name="description"]')?.getAttribute('content') ||
                                    doc.querySelector('meta[property="og:description"]')?.getAttribute('content');
-                
+
                 return {
                     ...metadata,
                     author: author?.trim(),
@@ -1306,7 +1451,7 @@
                 console.log('提取特定元数据失败:', e.message);
                 return metadata;
             }
-            
+
         } catch (error) {
             console.error('元数据提取失败:', error);
             return {};
@@ -1315,7 +1460,7 @@
     // --- 页面摘要 ---
     function handlePageSummarize(){
         console.log('📄 开始页面摘要...');
-        
+
         // 添加超时处理
         const timeoutId = setTimeout(() => {
             console.log('⏰ 页面摘要超时');
@@ -1326,17 +1471,17 @@
             // 停止状态环动画
             stopStatusRing();
         }, 10000); // 10秒超时
-        
+
         try {
             // 提取页面内容
             const readableContent = extractReadableContent();
             console.log('✅ 页面内容提取成功:', readableContent);
-            
+
             const body = document.getElementById('zh-panel-body');
             if (body) {
                 body.innerHTML = '<div style="text-align:center; padding:20px;">🤖 正在生成AI摘要...</div>';
             }
-            
+
             // 调用后台服务生成摘要
             chrome.runtime.sendMessage({
                 action: 'generateSummary',
@@ -1344,10 +1489,10 @@
             }, (response) => {
                 clearTimeout(timeoutId);
                 console.log('📊 摘要生成响应:', response);
-                
+
                 const body = document.getElementById('zh-panel-body');
                 if (!body) return;
-                
+
                 if (response && response.success) {
                     const summary = response.data;
                     const html = `
@@ -1376,7 +1521,7 @@
                 // 停止状态环动画
                 stopStatusRing();
             });
-            
+
         } catch (error) {
             clearTimeout(timeoutId);
             console.error('❌ 页面内容提取失败:', error);
@@ -1388,7 +1533,7 @@
             stopStatusRing();
         }
     }
-    
+
     // 辅助函数：停止状态环动画
     function stopStatusRing() {
         try {
@@ -1406,14 +1551,14 @@
     // ==========================================
     // 9. 智能识别作业区域功能
     // ==========================================
-    
+
     function handleAutoDetectHomework() {
         console.log('🎯 开始智能识别作业区域...');
-        
+
         try {
             // 1. 识别页面中的作业区域
             const homeworkAreas = detectHomeworkAreas();
-            
+
             if (homeworkAreas.length === 0) {
                 updatePanelBody(`
                     <div style="text-align:center; padding:30px; color:#666;">
@@ -1431,10 +1576,10 @@
                 animateRingStop();
                 return;
             }
-            
+
             // 2. 显示识别到的作业区域供用户选择
             displayHomeworkAreaSelection(homeworkAreas);
-            
+
         } catch (error) {
             console.error('❌ 智能识别失败:', error);
             updatePanelBody(`
@@ -1449,11 +1594,11 @@
             animateRingStop();
         }
     }
-    
+
     function detectHomeworkAreas() {
         console.log('🔍 开始检测作业区域...');
         const areas = [];
-        
+
         // 作业区域的常见选择器和关键词
         const homeworkSelectors = [
             // 智慧树特定选择器
@@ -1467,13 +1612,13 @@
             'textarea[placeholder*="作业"]', 'textarea[placeholder*="答案"]',
             '.answer-area', '.input-area', '.edit-area'
         ];
-        
+
         // 关键词匹配
         const homeworkKeywords = [
             '作业', '练习', '习题', '答题', '提交', '完成情况',
             'homework', 'assignment', 'exercise', 'question', 'answer'
         ];
-        
+
         // 1. 通过选择器查找
         homeworkSelectors.forEach(selector => {
             try {
@@ -1496,15 +1641,15 @@
                 console.log('选择器查找失败:', selector, e.message);
             }
         });
-        
+
         // 2. 通过文本内容查找
         const allElements = document.querySelectorAll('div, section, article, form');
         allElements.forEach(el => {
             const text = el.innerText || '';
-            const hasKeyword = homeworkKeywords.some(keyword => 
+            const hasKeyword = homeworkKeywords.some(keyword =>
                 text.toLowerCase().includes(keyword.toLowerCase())
             );
-            
+
             if (hasKeyword && isValidHomeworkArea(el)) {
                 const rect = el.getBoundingClientRect();
                 if (rect.width > 150 && rect.height > 150) {
@@ -1513,7 +1658,7 @@
                         return Math.abs(area.rect.left - rect.left) < 10 &&
                                Math.abs(area.rect.top - rect.top) < 10;
                     });
-                    
+
                     if (!isDuplicate) {
                         areas.push({
                             element: el,
@@ -1526,49 +1671,49 @@
                 }
             }
         });
-        
+
         // 3. 按置信度和大小排序
         areas.sort((a, b) => {
             const scoreA = a.confidence * (a.rect.width * a.rect.height);
             const scoreB = b.confidence * (b.rect.width * b.rect.height);
             return scoreB - scoreA;
         });
-        
+
         // 返回前5个最可能的区域
         const topAreas = areas.slice(0, 5);
         console.log(`✅ 检测到 ${topAreas.length} 个可能的作业区域`);
-        
+
         return topAreas;
     }
-    
+
     function isValidHomeworkArea(element) {
         // 检查元素是否可见
         const style = window.getComputedStyle(element);
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
             return false;
         }
-        
+
         // 检查元素是否在视口内或附近
         const rect = element.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) {
             return false;
         }
-        
+
         // 排除导航栏、页脚等
         const tagName = element.tagName.toLowerCase();
         if (['nav', 'header', 'footer', 'aside'].includes(tagName)) {
             return false;
         }
-        
+
         const className = element.className || '';
         const excludeClasses = ['nav', 'header', 'footer', 'sidebar', 'menu', 'ad'];
         if (excludeClasses.some(cls => className.toLowerCase().includes(cls))) {
             return false;
         }
-        
+
         return true;
     }
-    
+
     function displayHomeworkAreaSelection(areas) {
         let html = `
             <div style="padding:16px;">
@@ -1578,42 +1723,42 @@
                 </div>
                 <div style="max-height:400px; overflow-y:auto;">
         `;
-        
+
         areas.forEach((area, index) => {
             const preview = getAreaPreview(area.element);
             html += `
                 <div class="homework-area-item" data-index="${index}" style="
-                    margin-bottom:12px; 
-                    padding:12px; 
-                    border:2px solid #e0e0e0; 
-                    border-radius:8px; 
+                    margin-bottom:12px;
+                    padding:12px;
+                    border:2px solid #e0e0e0;
+                    border-radius:8px;
                     cursor:pointer;
                     transition:all 0.2s ease;
                     background:white;
-                " onmouseover="this.style.borderColor='#FF6B6B'; this.style.background='#fff5f5';" 
+                " onmouseover="this.style.borderColor='#FF6B6B'; this.style.background='#fff5f5';"
                    onmouseout="this.style.borderColor='#e0e0e0'; this.style.background='white';">
                     <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
                         <div style="
-                            width:32px; 
-                            height:32px; 
-                            background:#FF6B6B; 
-                            color:white; 
-                            border-radius:50%; 
-                            display:flex; 
-                            align-items:center; 
-                            justify-content:center; 
+                            width:32px;
+                            height:32px;
+                            background:#FF6B6B;
+                            color:white;
+                            border-radius:50%;
+                            display:flex;
+                            align-items:center;
+                            justify-content:center;
                             font-weight:600;
                             font-size:14px;
                         ">${index + 1}</div>
                         <div style="flex:1;">
                             <div style="font-weight:600; color:#333; margin-bottom:4px;">
-                                区域 ${index + 1} 
+                                区域 ${index + 1}
                                 <span style="
-                                    background:#4CAF50; 
-                                    color:white; 
-                                    padding:2px 8px; 
-                                    border-radius:12px; 
-                                    font-size:11px; 
+                                    background:#4CAF50;
+                                    color:white;
+                                    padding:2px 8px;
+                                    border-radius:12px;
+                                    font-size:11px;
                                     margin-left:8px;
                                 ">置信度 ${Math.round(area.confidence * 100)}%</span>
                             </div>
@@ -1623,47 +1768,47 @@
                         </div>
                     </div>
                     <div style="
-                        padding:8px; 
-                        background:#f5f5f5; 
-                        border-radius:4px; 
-                        font-size:12px; 
-                        color:#555; 
-                        max-height:60px; 
+                        padding:8px;
+                        background:#f5f5f5;
+                        border-radius:4px;
+                        font-size:12px;
+                        color:#555;
+                        max-height:60px;
                         overflow:hidden;
                         line-height:1.4;
                     ">${preview}</div>
                 </div>
             `;
         });
-        
+
         html += `
                 </div>
                 <div style="margin-top:16px; display:flex; gap:8px; justify-content:center;">
                     <button onclick="window.zhManualScreenshot()" style="
-                        background:#9E9E9E; 
-                        color:white; 
-                        border:none; 
-                        padding:10px 20px; 
-                        border-radius:6px; 
-                        cursor:pointer; 
+                        background:#9E9E9E;
+                        color:white;
+                        border:none;
+                        padding:10px 20px;
+                        border-radius:6px;
+                        cursor:pointer;
                         font-size:14px;
                     ">📸 手动截图</button>
                     <button onclick="window.zhSetCorrectionRules()" style="
-                        background:#2196F3; 
-                        color:white; 
-                        border:none; 
-                        padding:10px 20px; 
-                        border-radius:6px; 
-                        cursor:pointer; 
+                        background:#2196F3;
+                        color:white;
+                        border:none;
+                        padding:10px 20px;
+                        border-radius:6px;
+                        cursor:pointer;
                         font-size:14px;
                     ">⚙️ 批改设置</button>
                 </div>
             </div>
         `;
-        
+
         updatePanelBody(html);
         animateRingStop();
-        
+
         // 添加点击事件
         setTimeout(() => {
             const items = document.querySelectorAll('.homework-area-item');
@@ -1673,29 +1818,29 @@
                 });
             });
         }, 100);
-        
+
         // 全局函数
         window.zhManualScreenshot = () => {
             activateScreenshotMode();
         };
-        
+
         window.zhSetCorrectionRules = () => {
             showCorrectionRulesPanel();
         };
-        
+
         // 保存识别到的区域供后续使用
         window.detectedHomeworkAreas = areas;
     }
-    
+
     function getAreaPreview(element) {
         const text = element.innerText || element.textContent || '';
         const preview = text.trim().substring(0, 100);
         return preview || '(无文本内容)';
     }
-    
+
     function highlightAndCaptureArea(area) {
         console.log('📸 准备捕获选定的作业区域...');
-        
+
         // 高亮显示选中的区域
         const highlightOverlay = document.createElement('div');
         highlightOverlay.style.cssText = `
@@ -1710,9 +1855,9 @@
             pointer-events: none;
             animation: zh-pulse 1s ease-in-out;
         `;
-        
+
         document.body.appendChild(highlightOverlay);
-        
+
         // 更新面板显示
         updatePanelBody(`
             <div style="text-align:center; padding:30px;">
@@ -1722,7 +1867,7 @@
                 </div>
             </div>
         `);
-        
+
         // 延迟截图，让高亮动画显示
         setTimeout(() => {
             highlightOverlay.remove();
@@ -1734,14 +1879,14 @@
             });
         }, 500);
     }
-    
+
     // ==========================================
     // 10. 自定义批改规则功能
     // ==========================================
-    
+
     function showCorrectionRulesPanel() {
         console.log('⚙️ 显示批改规则设置面板...');
-        
+
         // 从本地存储读取已保存的规则
         chrome.storage.local.get(['correctionRules'], (result) => {
             const savedRules = result.correctionRules || {
@@ -1749,14 +1894,14 @@
                 strictness: 'medium',
                 customInstructions: ''
             };
-            
+
             const html = `
                 <div style="padding:16px; max-height:500px; overflow-y:auto;">
                     <div style="margin-bottom:20px; padding:12px; background:#e3f2fd; border-radius:8px;">
                         <h4 style="margin:0 0 8px 0; color:#1976D2;">⚙️ 批改规则设置</h4>
                         <p style="margin:0; font-size:13px; color:#555;">自定义AI批改的重点和标准</p>
                     </div>
-                    
+
                     <!-- 批改重点 -->
                     <div style="margin-bottom:20px;">
                         <label style="display:block; font-weight:600; margin-bottom:8px; color:#333;">
@@ -1765,27 +1910,27 @@
                         <div style="display:flex; flex-wrap:wrap; gap:8px;">
                             ${['语法', '拼写', '标点', '词汇', '句式', '逻辑', '格式', '内容'].map(area => `
                                 <label style="
-                                    display:inline-flex; 
-                                    align-items:center; 
-                                    padding:8px 12px; 
-                                    background:${savedRules.focusAreas.includes(area) ? '#FF6B6B' : '#f5f5f5'}; 
+                                    display:inline-flex;
+                                    align-items:center;
+                                    padding:8px 12px;
+                                    background:${savedRules.focusAreas.includes(area) ? '#FF6B6B' : '#f5f5f5'};
                                     color:${savedRules.focusAreas.includes(area) ? 'white' : '#333'};
-                                    border-radius:20px; 
+                                    border-radius:20px;
                                     cursor:pointer;
                                     transition:all 0.2s;
                                     font-size:13px;
-                                " onmouseover="if(this.style.background==='rgb(245, 245, 245)') this.style.background='#e0e0e0';" 
+                                " onmouseover="if(this.style.background==='rgb(245, 245, 245)') this.style.background='#e0e0e0';"
                                    onmouseout="if(this.style.background==='rgb(224, 224, 224)') this.style.background='#f5f5f5';">
-                                    <input type="checkbox" name="focusArea" value="${area}" 
+                                    <input type="checkbox" name="focusArea" value="${area}"
                                         ${savedRules.focusAreas.includes(area) ? 'checked' : ''}
-                                        style="margin-right:6px;" 
+                                        style="margin-right:6px;"
                                         onchange="this.parentElement.style.background=this.checked?'#FF6B6B':'#f5f5f5'; this.parentElement.style.color=this.checked?'white':'#333';">
                                     ${area}
                                 </label>
                             `).join('')}
                         </div>
                     </div>
-                    
+
                     <!-- 批改严格程度 -->
                     <div style="margin-bottom:20px;">
                         <label style="display:block; font-weight:600; margin-bottom:8px; color:#333;">
@@ -1798,16 +1943,16 @@
                                 {value: 'strict', label: '严格', desc: '细致批改'}
                             ].map(level => `
                                 <label style="
-                                    flex:1; 
-                                    padding:12px; 
+                                    flex:1;
+                                    padding:12px;
                                     border:2px solid ${savedRules.strictness === level.value ? '#FF6B6B' : '#e0e0e0'};
                                     background:${savedRules.strictness === level.value ? '#fff5f5' : 'white'};
-                                    border-radius:8px; 
+                                    border-radius:8px;
                                     cursor:pointer;
                                     text-align:center;
                                     transition:all 0.2s;
                                 ">
-                                    <input type="radio" name="strictness" value="${level.value}" 
+                                    <input type="radio" name="strictness" value="${level.value}"
                                         ${savedRules.strictness === level.value ? 'checked' : ''}
                                         style="display:none;">
                                     <div style="font-weight:600; margin-bottom:4px; color:#333;">${level.label}</div>
@@ -1816,19 +1961,19 @@
                             `).join('')}
                         </div>
                     </div>
-                    
+
                     <!-- 自定义批改指令 -->
                     <div style="margin-bottom:20px;">
                         <label style="display:block; font-weight:600; margin-bottom:8px; color:#333;">
                             ✍️ 自定义批改指令（选填）
                         </label>
-                        <textarea id="customInstructions" placeholder="例如：重点关注时态使用，忽略小的拼写错误..." 
+                        <textarea id="customInstructions" placeholder="例如：重点关注时态使用，忽略小的拼写错误..."
                             style="
-                                width:100%; 
-                                min-height:80px; 
-                                padding:10px; 
-                                border:1px solid #e0e0e0; 
-                                border-radius:6px; 
+                                width:100%;
+                                min-height:80px;
+                                padding:10px;
+                                border:1px solid #e0e0e0;
+                                border-radius:6px;
                                 font-size:13px;
                                 font-family:inherit;
                                 resize:vertical;
@@ -1837,34 +1982,34 @@
                             💡 提示：可以输入特定的批改要求，AI会根据你的指令进行批改
                         </div>
                     </div>
-                    
+
                     <!-- 按钮 -->
                     <div style="display:flex; gap:8px; justify-content:center;">
                         <button onclick="window.zhSaveCorrectionRules()" style="
-                            background:#4CAF50; 
-                            color:white; 
-                            border:none; 
-                            padding:10px 24px; 
-                            border-radius:6px; 
-                            cursor:pointer; 
+                            background:#4CAF50;
+                            color:white;
+                            border:none;
+                            padding:10px 24px;
+                            border-radius:6px;
+                            cursor:pointer;
                             font-size:14px;
                             font-weight:600;
                         ">💾 保存设置</button>
                         <button onclick="window.zhResetCorrectionRules()" style="
-                            background:#9E9E9E; 
-                            color:white; 
-                            border:none; 
-                            padding:10px 24px; 
-                            border-radius:6px; 
-                            cursor:pointer; 
+                            background:#9E9E9E;
+                            color:white;
+                            border:none;
+                            padding:10px 24px;
+                            border-radius:6px;
+                            cursor:pointer;
                             font-size:14px;
                         ">🔄 恢复默认</button>
                     </div>
                 </div>
             `;
-            
+
             updatePanelBody(html);
-            
+
             // 添加单选按钮的交互效果
             setTimeout(() => {
                 const radioLabels = document.querySelectorAll('label:has(input[name="strictness"])');
@@ -1880,20 +2025,20 @@
                 });
             }, 100);
         });
-        
+
         // 保存规则
         window.zhSaveCorrectionRules = () => {
             const focusAreas = Array.from(document.querySelectorAll('input[name="focusArea"]:checked'))
                 .map(cb => cb.value);
             const strictness = document.querySelector('input[name="strictness"]:checked')?.value || 'medium';
             const customInstructions = document.getElementById('customInstructions')?.value || '';
-            
+
             const rules = {
                 focusAreas,
                 strictness,
                 customInstructions
             };
-            
+
             chrome.storage.local.set({ correctionRules: rules }, () => {
                 console.log('✅ 批改规则已保存:', rules);
                 updatePanelBody(`
@@ -1904,19 +2049,19 @@
                             批改规则将在下次批改时生效
                         </p>
                         <button onclick="window.zhBackToDetection()" style="
-                            background:#FF6B6B; 
-                            color:white; 
-                            border:none; 
-                            padding:10px 20px; 
-                            border-radius:6px; 
-                            cursor:pointer; 
+                            background:#FF6B6B;
+                            color:white;
+                            border:none;
+                            padding:10px 20px;
+                            border-radius:6px;
+                            cursor:pointer;
                             font-size:14px;
                         ">返回识别</button>
                     </div>
                 `);
             });
         };
-        
+
         // 恢复默认
         window.zhResetCorrectionRules = () => {
             const defaultRules = {
@@ -1924,13 +2069,13 @@
                 strictness: 'medium',
                 customInstructions: ''
             };
-            
+
             chrome.storage.local.set({ correctionRules: defaultRules }, () => {
                 console.log('🔄 已恢复默认设置');
                 showCorrectionRulesPanel(); // 重新显示面板
             });
         };
-        
+
         // 返回识别
         window.zhBackToDetection = () => {
             if (window.detectedHomeworkAreas && window.detectedHomeworkAreas.length > 0) {
@@ -1940,7 +2085,7 @@
             }
         };
     }
-    
+
     // 测试函数 - 可以在控制台调用
     window.testContentExtraction = function() {
         console.log('🧪 测试页面内容提取...');
@@ -1956,7 +2101,7 @@
             return null;
         }
     };
-    
+
     // 手动触发摘要功能的测试函数
     window.testSummarizeFunction = function() {
         console.log('🧪 测试摘要功能...');
@@ -1968,20 +2113,20 @@
             console.error('❌ 摘要功能测试失败:', error);
         }
     };
-    
+
     // 完整的功能测试
     window.fullFunctionTest = function() {
         console.log('🚀 开始完整功能测试...');
-        
+
         // 1. 测试内容提取
         console.log('\n1. 测试内容提取...');
         const contentResult = window.testContentExtraction();
-        
+
         if (!contentResult) {
             console.log('❌ 内容提取失败，停止测试');
             return;
         }
-        
+
         // 2. 测试消息传递
         console.log('\n2. 测试消息传递...');
         chrome.runtime.sendMessage({action: 'ping'}, function(response) {
@@ -1989,7 +2134,7 @@
                 console.log('❌ 消息传递失败:', chrome.runtime.lastError.message);
             } else {
                 console.log('✅ 消息传递成功:', response);
-                
+
                 // 3. 测试摘要请求
                 console.log('\n3. 测试摘要请求...');
                 chrome.runtime.sendMessage({action: 'summarizePage'}, function(summaryResponse) {
@@ -1997,7 +2142,7 @@
                         console.log('❌ 摘要请求失败:', chrome.runtime.lastError.message);
                     } else if (summaryResponse && summaryResponse.success) {
                         console.log('✅ 摘要请求成功:', summaryResponse.data);
-                        
+
                         // 4. 测试AI摘要生成
                         console.log('\n4. 测试AI摘要生成...');
                         chrome.runtime.sendMessage({
@@ -2021,13 +2166,13 @@
             }
         });
     };
-    
+
     // 在控制台中提供快速测试命令
     console.log('💡 可用的测试命令:');
     console.log('  - testContentExtraction() - 测试内容提取功能');
     console.log('  - testSummarizeFunction() - 测试摘要功能');
     console.log('  - fullFunctionTest() - 完整功能测试');
-    
+
     // 添加调试信息
     console.log('🚀 智慧树 AI 助教 - 页面摘要功能已加载');
     console.log('📄 页面信息:', {
