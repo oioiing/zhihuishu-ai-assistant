@@ -66,6 +66,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ success: false, error: error.message });
                 });
             return true;
+
+        case 'analyzeHomeworkText':
+            analyzeHomeworkTextDirect(request.homeworkData)
+                .then(response => {
+                    sendResponse({ success: true, data: response });
+                })
+                .catch(error => {
+                    sendResponse({ success: false, error: error.message });
+                });
+            return true;
             
         case 'analyzeHomework':
             analyzeHomeworkWithAI(request.imageData, request.selectionInfo)
@@ -1491,5 +1501,64 @@ ${rawContent.substring(0, 3000)}
             keywords: [["连接失败", 1.0], ["请检查Key", 0.9]],
             source: 'error'
         };
+    }
+}
+// 直接分析文本作业
+async function analyzeHomeworkTextDirect(homeworkData) {
+    const { question, standardAnswer, studentAnswer } = homeworkData;
+
+    const prompt = `
+你是一位专业的教师，请对以下作业进行批改：
+
+【作业题目】
+${question || '未提供'}
+
+【参考答案】
+${standardAnswer || '未提供'}
+
+【学生答案】
+${studentAnswer || '未提供'}
+
+请严格按照以下 JSON 格式返回批改结果（只返回 JSON）：
+{
+    "score": 85,
+    "feedback": "详细的批改评语...",
+    "details": [
+        {"point": "优点/不足", "comment": "具体说明"}
+    ]
+}
+`;
+
+    const API_KEY = "YOUR_API_KEY_HERE";
+    const API_URL = "https://api.deepseek.com/chat/completions";
+
+    try {
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${API_KEY}`
+            },
+            body: JSON.stringify({
+                model: "deepseek-chat",
+                messages: [
+                    { role: "system", content: "你是一个专业的教育助手，擅长批改作业并给出客观的分数和建议。" },
+                    { role: "user", content: prompt }
+                ],
+                temperature: 0.3,
+                response_format: { type: "json_object" }
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`API Error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const content = data.choices[0].message.content;
+        return JSON.parse(content);
+    } catch (error) {
+        console.error('文本作业分析失败:', error);
+        throw error;
     }
 }
